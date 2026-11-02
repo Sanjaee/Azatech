@@ -14,8 +14,13 @@ declare global {
 
 export function getPool(): Pool {
   if (!global.__azatechPgPool) {
+    const isSsl =
+      env.DATABASE_URL.includes('neon.tech') ||
+      env.DATABASE_URL.includes('sslmode=require');
+
     global.__azatechPgPool = new Pool({
       connectionString: env.DATABASE_URL,
+      ssl: isSsl ? { rejectUnauthorized: false } : undefined,
       max: env.NODE_ENV === 'production' ? 5 : 10,
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 10000,
@@ -42,3 +47,4 @@ export const db = new Proxy({} as Database, {
     return typeof value === 'function' ? value.bind(activeDb) : value;
   },
 });
+
