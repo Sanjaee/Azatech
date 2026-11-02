@@ -14,7 +14,7 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
 
   beforeAll(async () => {
     process.env.NODE_ENV = 'test';
-    await ensureDatabaseReady({ forceInMemory: true, seed: true });
+    await ensureDatabaseReady({ seed: true });
 
     const loginRes = await request(app)
       .post('/api/auth/login')
@@ -35,6 +35,20 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
   });
 
   afterAll(async () => {
+    try {
+      const db = getDb();
+      const { like } = await import('drizzle-orm');
+      await db.delete(orders);
+      await db.delete(products).where(like(products.productCode, 'PRD-TEST-%'));
+      await db.delete(products).where(like(products.productCode, 'PRD-VAT-%'));
+      await db.delete(products).where(like(products.productCode, 'PRD-ORDER-%'));
+      await db.delete(products).where(like(products.productCode, 'PRD-ROLLBACK-%'));
+      await db.delete(products).where(like(products.productCode, 'PRD-CANCEL-%'));
+      await db.delete(products).where(like(products.productCode, 'PRD-TRANSITION-%'));
+      await db.delete(products).where(like(products.productCode, 'PRD-CONCURRENT-%'));
+    } catch {
+      // Ignore cleanup errors on teardown
+    }
     await closeDatabase();
   });
 
@@ -85,7 +99,7 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
   // =========================================================================
   describe('Products & Customers APIs', () => {
     it('enforces product_code uniqueness on creation (HTTP 409) and positive price / non-negative stock', async () => {
-      const uniqueCode = 'PRD-TEST-UNIQ-01';
+      const uniqueCode = `PRD-TEST-UNIQ-${Date.now()}`;
 
       const createRes = await request(app)
         .post('/api/products')
@@ -174,7 +188,7 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
         .post('/api/products')
         .set('Authorization', `Bearer ${token}`)
         .send({
-          product_code: 'PRD-VAT-150010',
+          product_code: `PRD-VAT-150010-${Date.now()}`,
           name: 'Variant C Tax Test Product',
           price: 150010,
           stock: 10,
@@ -208,7 +222,7 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
         .post('/api/products')
         .set('Authorization', `Bearer ${token}`)
         .send({
-          product_code: 'PRD-ORDER-OK-1',
+          product_code: `PRD-ORDER-OK-1-${Date.now()}`,
           name: 'Snapshot Item Alpha',
           price: 75000,
           stock: 20,
@@ -217,7 +231,7 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
         .post('/api/products')
         .set('Authorization', `Bearer ${token}`)
         .send({
-          product_code: 'PRD-ORDER-OK-2',
+          product_code: `PRD-ORDER-OK-2-${Date.now()}`,
           name: 'Snapshot Item Beta',
           price: 120000,
           stock: 10,
@@ -293,7 +307,7 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
         .post('/api/products')
         .set('Authorization', `Bearer ${token}`)
         .send({
-          product_code: 'PRD-ROLLBACK-OK',
+          product_code: `PRD-ROLLBACK-OK-${Date.now()}`,
           name: 'Available Stock Product',
           price: 50000,
           stock: 10,
@@ -303,7 +317,7 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
         .post('/api/products')
         .set('Authorization', `Bearer ${token}`)
         .send({
-          product_code: 'PRD-ROLLBACK-LOW',
+          product_code: `PRD-ROLLBACK-LOW-${Date.now()}`,
           name: 'Hydrococo 150ml Limited',
           price: 30000,
           stock: 3,
@@ -349,7 +363,7 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
         .post('/api/products')
         .set('Authorization', `Bearer ${token}`)
         .send({
-          product_code: 'PRD-CANCEL-RESTORE',
+          product_code: `PRD-CANCEL-RESTORE-${Date.now()}`,
           name: 'Cancelable Product',
           price: 100000,
           stock: 12,
@@ -401,7 +415,7 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
         .post('/api/products')
         .set('Authorization', `Bearer ${token}`)
         .send({
-          product_code: 'PRD-TRANSITION-409',
+          product_code: `PRD-TRANSITION-409-${Date.now()}`,
           name: 'Transition Guard Product',
           price: 200000,
           stock: 10,
@@ -465,7 +479,7 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
         .post('/api/products')
         .set('Authorization', `Bearer ${token}`)
         .send({
-          product_code: 'PRD-CONCURRENT-5',
+          product_code: `PRD-CONCURRENT-5-${Date.now()}`,
           name: 'Limited Edition GPU',
           price: 5000000,
           stock: 5,
@@ -544,3 +558,4 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
     });
   });
 });
+
