@@ -1,4 +1,5 @@
-import { Request, Response, NextFunction } from 'express';
+import { Response, NextFunction } from 'express';
+import { AuthenticatedRequest } from '../../types';
 import { ordersService } from './orders.service';
 import {
   createOrderSchema,
@@ -8,17 +9,19 @@ import {
 import { sendSuccess } from '../../utils/response';
 
 export class OrdersController {
-  async create(req: Request, res: Response, next: NextFunction): Promise<void> {
+  async create(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
       const body = createOrderSchema.parse(req.body);
-      const order = await ordersService.createOrder(body);
+      const idempotencyKey = (req.headers['idempotency-key'] as string | undefined)?.trim();
+      const userId = req.user?.sub;
+      const order = await ordersService.createOrder(body, { idempotencyKey, userId });
       sendSuccess(res, order, 'Order created successfully', 201);
     } catch (error) {
       next(error);
     }
   }
 
-  async list(req: Request, res: Response, next: NextFunction): Promise<void> {
+  async list(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
       const query = listOrdersQuerySchema.parse(req.query);
       const { items, meta } = await ordersService.listOrders(query);
@@ -28,7 +31,7 @@ export class OrdersController {
     }
   }
 
-  async getById(req: Request, res: Response, next: NextFunction): Promise<void> {
+  async getById(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
       const { id } = orderIdParamSchema.parse(req.params);
       const order = await ordersService.getOrderById(id);
@@ -38,7 +41,7 @@ export class OrdersController {
     }
   }
 
-  async pay(req: Request, res: Response, next: NextFunction): Promise<void> {
+  async pay(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
       const { id } = orderIdParamSchema.parse(req.params);
       const order = await ordersService.payOrder(id);
@@ -48,7 +51,7 @@ export class OrdersController {
     }
   }
 
-  async cancel(req: Request, res: Response, next: NextFunction): Promise<void> {
+  async cancel(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
       const { id } = orderIdParamSchema.parse(req.params);
       const order = await ordersService.cancelOrder(id);

@@ -109,3 +109,39 @@ The repository uses an independent two-project monorepo (`backend/` and `fronten
 3. **Audit Trail for Inventory & Status Changes:**
    - *Current State:* `products.stock` is updated in-place during `ProductsService.update`, `OrdersService.createOrder`, and `OrdersService.cancelOrder`.
    - *Next Improvement:* Introduce an immutable `inventory_movements` ledger table recording every stock delta (`+` / `-`), actor `user_id`, reason (`INITIAL_SEED`, `MANUAL_ADJUSTMENT`, `ORDER_CREATED`, `ORDER_CANCELLED`), and reference `order_id`.
+
+
+---
+
+## 5. Concurrency, Counter Allocation & Idempotency Key Design
+
+### A. Daily Order Counter (`order_counters`) & Asia/Jakarta Timezone
+To prevent race conditions during high-concurrency order placement without locking entire tables, we implemented a dedicated daily counter table `order_counters` with:
+- `date_key VARCHAR(8) PRIMARY KEY`: Formatted as `YYYYMMDD` using the `Asia/Jakarta` timezone (`Intl.DateTimeFormat` with `timeZone: 'Asia/Jakarta'`).
+- `last_sequence INTEGER NOT NULL`: The highest sequence allocated for that date.
+
+Sequence allocation inside the order creation transaction executes:
+```sql
+INSERT INTO order_counters (date_key, last_sequence, updated_at)
+VALUES ($1, 1, NOW())
+ON CONFLICT (date_key) DO UPDATE
+SET last_sequence = order_counters.last_sequence + 1, updated_at = NOW()
+RETURNING last_sequence;
+```
+This guarantees strictly sequential, gapless numbers formatted as `INV-YYYYMMDD-XXXX` (e.g. `INV-20261102-0001`) with row-level locks held only for microsecond durations. Furthermore, a `UNIQUE` constraint on `orders.order_number` acts as a fail-safe.
+
+### B. Single Transaction Cancellation Safety
+Order cancellation (`OrdersService.cancelOrder`) executes inside a single database transaction using conditional status transitions:
+1. `SELECT ... FROM orders WHERE id = $1 FOR UPDATE` locks the order row.
+2. If `order.status` is not `PENDING` or `PAID`, throw `ConflictError` (HTTP 409).
+3. Update `orders.status = 'CANCELLED'` conditionally (`WHERE id = $1 AND status IN ('PENDING', 'PAID')`).
+4. Read all items from `order_items` and restore each product's stock (`stock = stock + quantity`).
+If two simultaneous cancel requests are fired via `Promise.all`, exactly one successfully transitions the status and restores stock; the second receives HTTP 409 and stock is never restored twice.
+
+### C. Idempotency Key Handling (`order_idempotency`)
+For clients supplying the `Idempotency-Key` HTTP header:
+1. A unique database constraint on `(user_id, idempotency_key)` prevents collision.
+2. The SHA-256 hash of the request payload is persisted.
+3. If a request is received with an existing `Idempotency-Key`:
+   - If the request payload matches the recorded hash, the previously created order is fetched and returned immediately without recreating or re-decrementing stock.
+   - If the request payload differs from the original hash, the server immediately rejects the request with `HTTP 409 Conflict`.

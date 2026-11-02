@@ -1,7 +1,10 @@
+import crypto from 'crypto';
 import { and, asc, desc, eq, gte, inArray, like, lte, sql } from 'drizzle-orm';
 import { getDb } from '../../db';
 import {
   customers,
+  orderCounters,
+  orderIdempotency,
   orderItems,
   orders,
   products,
@@ -92,74 +95,79 @@ function serializeOrderSummary(order: Order, customer: Customer): SerializedOrde
   };
 }
 
-function formatDateSegment(date: Date): string {
-  const yyyy = date.getFullYear().toString();
-  const mm = (date.getMonth() + 1).toString().padStart(2, '0');
-  const dd = date.getDate().toString().padStart(2, '0');
-  return `${yyyy}${mm}${dd}`;
+/**
+ * Format date in Asia/Jakarta timezone as YYYYMMDD string.
+ */
+export function getJakartaDateKey(now: Date = new Date()): string {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Jakarta',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+  return formatter.format(now).replace(/-/g, '');
+}
+
+export interface CreateOrderOptions {
+  idempotencyKey?: string;
+  userId?: string;
 }
 
 export class OrdersService {
   /**
    * Generates a unique order number in the format INV-YYYYMMDD-XXXX inside an active transaction.
-   * Uses a PostgreSQL transaction-level advisory lock keyed on the date integer so concurrent
-   * transactions creating orders at the exact same millisecond serialize sequence assignment cleanly.
+   * Uses an atomic PostgreSQL daily counter table (order_counters) with:
+   * - date_key as primary key (Asia/Jakarta timezone YYYYMMDD)
+   * - last_sequence as integer
+   * - INSERT ON CONFLICT DO UPDATE RETURNING to allocate the sequence atomically under concurrency.
    */
   private async generateOrderNumber(
     tx: Parameters<Parameters<ReturnType<typeof getDb>['transaction']>[0]>[0],
     now: Date = new Date()
   ): Promise<string> {
-    const dateSegment = formatDateSegment(now);
-    const lockKey = Number(dateSegment);
+    const dateKey = getJakartaDateKey(now);
 
-    // Acquire transaction-scoped advisory lock for today's invoice sequence
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(${lockKey})`);
+    const result = await tx.execute<{ last_sequence: number }>(sql`
+      INSERT INTO order_counters (date_key, last_sequence, updated_at)
+      VALUES (${dateKey}, 1, NOW())
+      ON CONFLICT (date_key)
+      DO UPDATE SET
+        last_sequence = order_counters.last_sequence + 1,
+        updated_at = NOW()
+      RETURNING last_sequence
+    `);
 
-    const prefix = `INV-${dateSegment}-`;
-    const latestOrders = await tx
-      .select({ orderNumber: orders.orderNumber })
-      .from(orders)
-      .where(like(orders.orderNumber, `${prefix}%`))
-      .orderBy(desc(orders.orderNumber))
-      .limit(1);
-
-    let nextSeq = 1;
-    if (latestOrders.length > 0) {
-      const lastOrderNumber = latestOrders[0].orderNumber;
-      const parts = lastOrderNumber.split('-');
-      const seqPart = parts[parts.length - 1];
-      const parsed = Number.parseInt(seqPart, 10);
-      if (!Number.isNaN(parsed) && parsed >= 1) {
-        nextSeq = parsed + 1;
-      }
-    }
-
-    const paddedSeq = nextSeq.toString().padStart(4, '0');
-    return `${prefix}${paddedSeq}`;
+    const seq = Number(result.rows[0].last_sequence);
+    const paddedSeq = seq.toString().padStart(4, '0');
+    return `INV-${dateKey}-${paddedSeq}`;
   }
 
   /**
-   * Transactional Order Creation (Section 8 & Section 9)
+   * Transactional Order Creation (Section 8, Section 9, & Section E)
    *
    * 1. Validate customer existence.
    * 2. Validate that items are not empty.
    * 3. Validate positive integer quantities.
    * 4. Reject duplicate product IDs with clear item-level validation errors.
-   * 5. Begin a database transaction.
-   * 6. Lock all affected product rows in a consistent ascending ID order (SELECT ... FOR UPDATE).
-   * 7. Read current prices and stock.
-   * 8. Validate all product records exist.
-   * 9. Validate sufficient stock for every item.
-   * 10. Calculate each item subtotal.
-   * 11. Calculate order subtotal.
+   * 5. Check idempotency key if provided: identical payload replays order, different payload returns 409.
+   * 6. Begin a database transaction.
+   * 7. Lock all affected product rows in a consistent ascending ID order (SELECT ... FOR UPDATE).
+   * 8. Read current prices and stock.
+   * 9. Validate all product records exist.
+   * 10. Validate sufficient stock for every item.
+   * 11. Calculate each item subtotal and order subtotal.
    * 12. Calculate Variant C tax (CEILING(subtotal * 0.11 / 100) * 100).
-   * 13. Generate a unique order number (INV-YYYYMMDD-XXXX).
+   * 13. Generate unique order number (INV-YYYYMMDD-XXXX) via atomic order_counters table.
    * 14. Insert the order.
-   * 15. Insert all order items with price and product information snapshots.
+   * 15. Insert all order items with price and product snapshots.
    * 16. Decrease product stock atomically.
-   * 17. Commit the transaction.
+   * 17. Record idempotency key if provided.
+   * 18. Commit the transaction.
    */
-  async createOrder(input: CreateOrderInput): Promise<SerializedOrderDetail> {
+  async createOrder(
+    input: CreateOrderInput,
+    options?: CreateOrderOptions
+  ): Promise<SerializedOrderDetail> {
     const db = getDb();
 
     // Step 4: Reject duplicate product IDs in request items
@@ -180,7 +188,37 @@ export class OrdersService {
       throw new ValidationError('Duplicate product entries are not allowed', duplicateErrors);
     }
 
-    // Step 5: Begin database transaction
+    // Optional Idempotency-Key verification (Section E)
+    let payloadHash: string | undefined;
+    if (options?.idempotencyKey && options?.userId) {
+      payloadHash = crypto
+        .createHash('sha256')
+        .update(JSON.stringify(input))
+        .digest('hex');
+
+      const existingRecord = await db
+        .select()
+        .from(orderIdempotency)
+        .where(
+          and(
+            eq(orderIdempotency.idempotencyKey, options.idempotencyKey),
+            eq(orderIdempotency.userId, options.userId)
+          )
+        )
+        .limit(1);
+
+      if (existingRecord.length > 0) {
+        const record = existingRecord[0];
+        if (record.requestPayloadHash !== payloadHash) {
+          throw new ConflictError(
+            'Idempotency key reuse with different request payload is forbidden'
+          );
+        }
+        return this.getOrderById(record.orderId);
+      }
+    }
+
+    // Step 6: Begin database transaction
     return await db.transaction(async (tx) => {
       // Step 1: Validate customer existence
       const [customer] = await tx
@@ -195,7 +233,7 @@ export class OrdersService {
         });
       }
 
-      // Step 6: Lock all affected product rows in a consistent ascending ID order to prevent deadlocks
+      // Step 7: Lock all affected product rows in a consistent ascending ID order to prevent deadlocks
       const sortedProductIds = [...input.items.map((i) => i.product_id)].sort((a, b) =>
         a.localeCompare(b)
       );
@@ -209,7 +247,7 @@ export class OrdersService {
 
       const productMap = new Map(lockedProducts.map((p) => [p.id, p]));
 
-      // Step 8: Validate all product records exist
+      // Step 9: Validate all product records exist
       const missingErrors: Record<string, string[]> = {};
       input.items.forEach((item, idx) => {
         if (!productMap.has(item.product_id)) {
@@ -223,7 +261,7 @@ export class OrdersService {
         throw new NotFoundError('One or more products were not found', missingErrors);
       }
 
-      // Step 9: Validate sufficient stock for every item after acquiring row locks
+      // Step 10: Validate sufficient stock for every item after acquiring row locks
       const stockErrors: Record<string, string[]> = {};
       input.items.forEach((item, idx) => {
         const product = productMap.get(item.product_id)!;
@@ -238,7 +276,7 @@ export class OrdersService {
         throw new ValidationError('Insufficient stock', stockErrors);
       }
 
-      // Steps 10 & 11: Calculate each item subtotal and order subtotal from DB unit prices
+      // Step 11: Calculate each item subtotal and order subtotal from trusted DB unit prices
       let orderSubtotalCents = 0n;
       const preparedItems: Array<{
         productId: string;
@@ -269,7 +307,7 @@ export class OrdersService {
       const { subtotalCents, taxAmountCents, grandTotalCents } =
         calculateVariantCTaxCents(orderSubtotalCents);
 
-      // Step 13: Generate unique order number (INV-YYYYMMDD-XXXX)
+      // Step 13: Generate unique order number (INV-YYYYMMDD-XXXX) via atomic order_counters table
       const orderNumber = await this.generateOrderNumber(tx);
 
       // Step 14: Insert the order
@@ -324,7 +362,17 @@ export class OrdersService {
         }
       }
 
-      // Step 17: Return full order detail (transaction commits upon return)
+      // Step 17: Save Idempotency-Key mapping if present
+      if (options?.idempotencyKey && options?.userId && payloadHash) {
+        await tx.insert(orderIdempotency).values({
+          idempotencyKey: options.idempotencyKey,
+          userId: options.userId,
+          requestPayloadHash: payloadHash,
+          orderId: createdOrder.id,
+        });
+      }
+
+      // Step 18: Return full order detail (transaction commits upon return)
       return {
         ...serializeOrderSummary(createdOrder, customer),
         items: insertedItems.map(serializeOrderItem),
@@ -460,18 +508,20 @@ export class OrdersService {
   }
 
   /**
-   * Cancel Order (Section 10)
+   * Cancel Order (Section 10 & Section D)
    * Allowed transitions:
    *   PENDING -> CANCELLED
    *   PAID -> CANCELLED
-   * Calling cancel on an already CANCELLED order returns HTTP 409 and never restores stock twice.
-   * Restores all ordered quantities to product stock atomically inside the same transaction.
+   *
+   * Enforced in a single ACID transaction with row-level locking (SELECT ... FOR UPDATE).
+   * Simultaneous cancellation requests cannot restore stock twice.
+   * Stock is restored only when order status transitions successfully to CANCELLED.
    */
   async cancelOrder(orderId: string): Promise<SerializedOrderDetail> {
     const db = getDb();
 
     await db.transaction(async (tx) => {
-      // Lock the order row first to prevent duplicate concurrent cancellation
+      // 1. Lock the order row exclusively to prevent simultaneous cancellations
       const [existing] = await tx
         .select()
         .from(orders)
@@ -492,13 +542,14 @@ export class OrdersService {
         );
       }
 
+      // 2. Fetch order items for inventory restoration
       const items = await tx
         .select()
         .from(orderItems)
         .where(eq(orderItems.orderId, orderId));
 
       if (items.length > 0) {
-        // Lock affected products in ascending ID order to avoid deadlocks with concurrent order creations
+        // Lock affected products in ascending ID order to prevent deadlocks
         const sortedProductIds = [...new Set(items.map((i) => i.productId))].sort((a, b) =>
           a.localeCompare(b)
         );
@@ -510,6 +561,7 @@ export class OrdersService {
           .orderBy(asc(products.id))
           .for('update');
 
+        // Restore each line item's ordered quantity
         for (const item of items) {
           await tx
             .update(products)
@@ -521,6 +573,7 @@ export class OrdersService {
         }
       }
 
+      // 3. Mark order status as CANCELLED in the same transaction
       await tx
         .update(orders)
         .set({

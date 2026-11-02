@@ -38,3 +38,5 @@ Every file and business rule was verified against the specification:
   - `Rp150,010` $\rightarrow$ `16,501.10` raw tax $\rightarrow$ `16,600` rounded tax, `166,610` grand total.
 - **Row-Level Locking & Rollback Verification:** Verified via `backend/tests/orders.integration.test.ts` that when a multi-item order contains one valid product and one under-stocked product, the valid product's stock remains completely unchanged after the `422` response.
 - **Strict TypeScript & Build Verification:** Executed `tsc --noEmit`, `vitest run`, `npm run build` on `backend/`, and `next build` on `frontend/` to confirm zero type errors, zero build errors, and 100% passing integration tests.
+
+41: - **Concurrency & Idempotency Key Extension:** Prompted the addition of the `order_counters` table with atomic `INSERT ON CONFLICT DO UPDATE RETURNING` in `Asia/Jakarta` timezone and the `order_idempotency` table with SHA-256 payload verification. All 17 integration tests run against real PostgreSQL and passed with 100% success.

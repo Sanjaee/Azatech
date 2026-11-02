@@ -91,6 +91,31 @@ export const orders = pgTable(
   ]
 );
 
+export const orderCounters = pgTable('order_counters', {
+  dateKey: varchar('date_key', { length: 8 }).primaryKey(), // YYYYMMDD in Asia/Jakarta
+  lastSequence: integer('last_sequence').notNull().default(0),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const orderIdempotency = pgTable(
+  'order_idempotency',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    idempotencyKey: varchar('idempotency_key', { length: 255 }).notNull(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    requestPayloadHash: varchar('request_payload_hash', { length: 64 }).notNull(),
+    orderId: uuid('order_id')
+      .notNull()
+      .references(() => orders.id, { onDelete: 'cascade' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('order_idempotency_key_user_idx').on(table.idempotencyKey, table.userId),
+  ]
+);
+
 export const orderItems = pgTable(
   'order_items',
   {
@@ -153,4 +178,7 @@ export type NewOrder = typeof orders.$inferInsert;
 
 export type OrderItem = typeof orderItems.$inferSelect;
 export type NewOrderItem = typeof orderItems.$inferInsert;
+
+export type OrderCounter = typeof orderCounters.$inferSelect;
+export type OrderIdempotency = typeof orderIdempotency.$inferSelect;
 export type OrderStatus = 'PENDING' | 'PAID' | 'CANCELLED';

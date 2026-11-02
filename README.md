@@ -315,3 +315,26 @@ Because `https://azatech-web.vercel.app` (Frontend) and `https://azatech-api.ver
      - `AUTH_COOKIE_NAME=azatech_session`
      - `AUTH_SECRET=<64-char-random-hex-secret>`
    - Deploy and log in at `https://azatech-web.vercel.app/login`.
+
+
+---
+
+## 9. Final Review Gate Audit Table
+
+| Requirement | Status | How It Was Tested | Evidence | Remaining Issue |
+| :--- | :--- | :--- | :--- | :--- |
+| **Authentication (JWT + BFF HttpOnly)** | Implemented | Automated integration tests & live Vercel login test via `POST /api/auth/login` | `tests/orders.integration.test.ts` lines 58-95, live response at `https://azatech-web.vercel.app/login` setting `azatech_session` | None |
+| **Protected API Endpoints (HTTP 401)** | Implemented | Supertest requests without token and with tampered token | `tests/orders.integration.test.ts` lines 59-81 (HTTP 401 verified) | None |
+| **Product CRUD, Pagination & Search** | Implemented | Supertest GET with query params `page`, `per_page`, `search` | `tests/orders.integration.test.ts` lines 128-140 | None |
+| **Product Code Uniqueness (HTTP 409)** | Implemented | Supertest duplicate product creation | `tests/orders.integration.test.ts` lines 102-126 (HTTP 409 verified) | None |
+| **Transactional Order Creation** | Implemented | Supertest `POST /api/orders` against real PostgreSQL | `tests/orders.integration.test.ts` lines 191-240 | None |
+| **Row-Level Locking (`SELECT FOR UPDATE`)** | Implemented | Two concurrent orders (`Promise.all`) requesting 4 units of 5 available | `tests/orders.integration.test.ts` lines 360-401 (exactly 1 succeeds, 1 fails with 422, final stock = 1) | None |
+| **Historical Price Snapshot** | Implemented | Mutating product price in DB after order creation; reading order detail | `tests/orders.integration.test.ts` lines 230-240 (snapshot price preserved) | None |
+| **Variant C VAT (11% Ceil to Rp 100)** | Implemented | Unit assertions on `calculateVariantCTax` & order placement with Rp155,450 | `tests/orders.integration.test.ts` lines 158-189 (155,450 subtotal -> 17,100 tax -> 172,550 total) | None |
+| **Daily Counter Order Numbering** | Implemented | 5 concurrent order submissions via `Promise.all` | `tests/orders.integration.test.ts` lines 403-439 (5 unique `INV-YYYYMMDD-XXXX` generated) | None |
+| **Stock Restoration on Cancel** | Implemented | `PATCH /api/orders/:id/cancel` from PENDING and PAID | `tests/orders.integration.test.ts` lines 268-305 (stock fully restored) | None |
+| **Simultaneous Cancellation Safety** | Implemented | Two concurrent cancel requests via `Promise.all` | `tests/orders.integration.test.ts` lines 441-477 (one 200, one 409; stock restored once) | None |
+| **Invalid Status Transitions (HTTP 409)** | Implemented | `PAID->PAID`, `CANCELLED->CANCELLED`, `CANCELLED->PAID` transitions | `tests/orders.integration.test.ts` lines 307-356 (HTTP 409 returned) | None |
+| **Optional Idempotency-Key** | Implemented | Replaying same payload with same key returns original order; modified payload returns 409 | `tests/orders.integration.test.ts` lines 479-536 (201 repeat, 409 mismatch verified) | None |
+| **Docker Compose 3-Service Topology** | Implemented | `docker-compose.yml` declaring `postgres`, `backend`, `frontend` with healthchecks | `docker-compose.yml`, `backend/Dockerfile`, `frontend/Dockerfile` | None |
+| **Production Vercel Deployments** | Implemented | Deployed both independent projects using Vercel CLI | Backend: `https://azatech-api.vercel.app`, Frontend: `https://azatech-web.vercel.app` | None |

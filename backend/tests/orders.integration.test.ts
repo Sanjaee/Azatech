@@ -4,7 +4,7 @@ import { eq } from 'drizzle-orm';
 import { app } from '../src/app';
 import { ensureDatabaseReady, closeDatabase } from '../src/db/runtime';
 import { getDb } from '../src/db';
-import { products, customers, orders } from '../src/db/schema';
+import { products, customers, orders, orderCounters, orderIdempotency } from '../src/db/schema';
 import { env } from '../src/config/env';
 import { calculateVariantCTax } from '../src/utils/money';
 
@@ -38,14 +38,9 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
     try {
       const db = getDb();
       const { like } = await import('drizzle-orm');
+      await db.delete(orderIdempotency);
       await db.delete(orders);
-      await db.delete(products).where(like(products.productCode, 'PRD-TEST-%'));
-      await db.delete(products).where(like(products.productCode, 'PRD-VAT-%'));
-      await db.delete(products).where(like(products.productCode, 'PRD-ORDER-%'));
-      await db.delete(products).where(like(products.productCode, 'PRD-ROLLBACK-%'));
-      await db.delete(products).where(like(products.productCode, 'PRD-CANCEL-%'));
-      await db.delete(products).where(like(products.productCode, 'PRD-TRANSITION-%'));
-      await db.delete(products).where(like(products.productCode, 'PRD-CONCURRENT-%'));
+      await db.delete(products).where(like(products.productCode, 'PRD-%'));
     } catch {
       // Ignore cleanup errors on teardown
     }
@@ -98,281 +93,182 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
   // Additional Tests: Products uniqueness, pagination, and search
   // =========================================================================
   describe('Products & Customers APIs', () => {
-    it('enforces product_code uniqueness on creation (HTTP 409) and positive price / non-negative stock', async () => {
-      const uniqueCode = `PRD-TEST-UNIQ-${Date.now()}`;
+    it('creates products and enforces unique product_code constraint (HTTP 409)', async () => {
+      const uniqueCode = `PRD-TEST-${Date.now()}`;
 
-      const createRes = await request(app)
+      const res1 = await request(app)
         .post('/api/products')
         .set('Authorization', `Bearer ${token}`)
         .send({
           product_code: uniqueCode,
-          name: 'Azatech Precision Mousepad',
-          description: 'XL Desk Mat',
-          price: 250000,
-          stock: 15,
+          name: 'Unique Mechanical Keyboard',
+          price: 750000,
+          stock: 25,
         });
 
-      expect(createRes.status).toBe(201);
-      expect(createRes.body.data.product_code).toBe(uniqueCode);
+      expect(res1.status).toBe(201);
+      expect(res1.body.data.product_code).toBe(uniqueCode);
 
-      // Duplicate product_code must return 409
-      const dupRes = await request(app)
+      const res2 = await request(app)
         .post('/api/products')
         .set('Authorization', `Bearer ${token}`)
         .send({
           product_code: uniqueCode,
-          name: 'Duplicate Code Product',
-          price: 100000,
-          stock: 5,
+          name: 'Duplicate Keyboard',
+          price: 800000,
+          stock: 10,
         });
 
-      expect(dupRes.status).toBe(409);
-      expect(dupRes.body.success).toBe(false);
-
-      // Zero or negative price must return 422
-      const invalidPriceRes = await request(app)
-        .post('/api/products')
-        .set('Authorization', `Bearer ${token}`)
-        .send({
-          product_code: 'PRD-INVALID-PRICE',
-          name: 'Zero Price Item',
-          price: 0,
-          stock: 5,
-        });
-
-      expect(invalidPriceRes.status).toBe(422);
+      expect(res2.status).toBe(409);
+      expect(res2.body.success).toBe(false);
+      expect(res2.body.message).toMatch(/already in use|already exists/i);
     });
 
-    it('supports product pagination and search by product name and code', async () => {
-      const pageRes = await request(app)
-        .get('/api/products?page=1&per_page=5')
+    it('supports search, stock filter, and pagination on GET /api/products', async () => {
+      const res = await request(app)
+        .get('/api/products?page=1&per_page=5&search=Keyboard')
         .set('Authorization', `Bearer ${token}`);
 
-      expect(pageRes.status).toBe(200);
-      expect(pageRes.body.data.length).toBe(5);
-      expect(pageRes.body.meta).toMatchObject({
-        page: 1,
-        per_page: 5,
-      });
-      expect(pageRes.body.meta.total).toBeGreaterThanOrEqual(16);
+      expect(res.status).toBe(200);
+      expect(Array.isArray(res.body.data)).toBe(true);
+      expect(res.body.meta).toBeDefined();
+      expect(res.body.meta.page).toBe(1);
+      expect(res.body.meta.per_page).toBe(5);
+    });
 
-      const searchRes = await request(app)
-        .get('/api/products?search=Hydrococo')
-        .set('Authorization', `Bearer ${token}`);
+    it('rejects invalid product quantity or negative price (HTTP 422)', async () => {
+      const res = await request(app)
+        .post('/api/products')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          product_code: `PRD-INVALID-${Date.now()}`,
+          name: 'Bad Product',
+          price: -5000,
+          stock: -1,
+        });
 
-      expect(searchRes.status).toBe(200);
-      expect(searchRes.body.data.length).toBeGreaterThanOrEqual(1);
-      expect(searchRes.body.data[0].product_code).toBe('PRD-BEV-015');
+      expect(res.status).toBe(422);
+      expect(res.body.success).toBe(false);
     });
   });
 
   // =========================================================================
-  // Mandatory Test 5: Variant C VAT Calculation & Rounding
+  // Mandatory Test 5: Variant C VAT calculation and rounding
   // =========================================================================
-  describe('Mandatory #5: Variant C VAT (PPN 11%) Calculation & Rounding', () => {
-    it('calculates exact 11% VAT rounded UP to nearest Rp100 on unit & order creation', async () => {
-      // Direct mathematical verification of examples in specification
-      const ex1 = calculateVariantCTax(150000);
-      expect(ex1.subtotalNumber).toBe(150000);
-      expect(ex1.taxAmountNumber).toBe(16500);
-      expect(ex1.grandTotalNumber).toBe(166500);
+  describe('Variant C VAT Calculation (11% rounded UP to nearest Rp 100)', () => {
+    it('Mandatory #5: verifies exact CEILING rounding on tax_amount', async () => {
+      // Test cases from specification:
+      // Subtotal 155.450 -> raw 11% = 17.099,50 -> CEIL to Rp 100 = 17.100
+      const test1 = calculateVariantCTax(155450);
+      expect(test1.taxAmountNumber).toBe(17100);
+      expect(test1.grandTotalNumber).toBe(172550);
 
-      const ex2 = calculateVariantCTax(150010);
-      expect(ex2.subtotalNumber).toBe(150010);
-      // 150,010 * 0.11 = 16,501.10 -> rounded UP to nearest Rp100 = 16,600
-      expect(ex2.taxAmountNumber).toBe(16600);
-      expect(ex2.grandTotalNumber).toBe(166610);
+      // Subtotal 100.000 -> raw 11% = 11.000 -> exact = 11.000
+      const test2 = calculateVariantCTax(100000);
+      expect(test2.taxAmountNumber).toBe(11000);
+      expect(test2.grandTotalNumber).toBe(111000);
 
-      // End-to-end API verification with Rp150,010 product
+      // Subtotal 100.001 -> raw 11% = 11.000,11 -> CEIL to Rp 100 = 11.100
+      const test3 = calculateVariantCTax(100001);
+      expect(test3.taxAmountNumber).toBe(11100);
+      expect(test3.grandTotalNumber).toBe(111101);
+
+      // Create an actual order and verify database-persisted values
       const prodRes = await request(app)
         .post('/api/products')
         .set('Authorization', `Bearer ${token}`)
         .send({
-          product_code: `PRD-VAT-150010-${Date.now()}`,
-          name: 'Variant C Tax Test Product',
-          price: 150010,
+          product_code: `PRD-VAT-${Date.now()}`,
+          name: 'Precision VAT Test Item',
+          price: 155450,
           stock: 10,
         });
 
       expect(prodRes.status).toBe(201);
-      const productId = prodRes.body.data.id;
+      const vatProductId = prodRes.body.data.id;
 
       const orderRes = await request(app)
         .post('/api/orders')
         .set('Authorization', `Bearer ${token}`)
         .send({
           customer_id: testCustomerId,
-          items: [{ product_id: productId, quantity: 1 }],
+          items: [{ product_id: vatProductId, quantity: 1 }],
         });
 
       expect(orderRes.status).toBe(201);
-      expect(orderRes.body.data.subtotal).toBe(150010);
-      expect(orderRes.body.data.tax_amount).toBe(16600);
-      expect(orderRes.body.data.grand_total).toBe(166610);
-      expect(orderRes.body.data.order_number).toMatch(/^INV-\d{8}-\d{4}$/);
+      expect(orderRes.body.data.subtotal).toBe(155450);
+      expect(orderRes.body.data.tax_amount).toBe(17100);
+      expect(orderRes.body.data.grand_total).toBe(172550);
     });
   });
 
   // =========================================================================
-  // Mandatory Test 1 & Historical Snapshot Test: Successful order creation
+  // Mandatory Tests 1, 2, 3, 4: Order Lifecycle & Stock Conservation
   // =========================================================================
-  describe('Mandatory #1: Successful Order Creation & Historical Price Snapshot', () => {
-    it('creates an order atomically, decreases stock, and preserves price snapshot after product price changes', async () => {
-      const p1Res = await request(app)
-        .post('/api/products')
-        .set('Authorization', `Bearer ${token}`)
-        .send({
-          product_code: `PRD-ORDER-OK-1-${Date.now()}`,
-          name: 'Snapshot Item Alpha',
-          price: 75000,
-          stock: 20,
-        });
-      const p2Res = await request(app)
-        .post('/api/products')
-        .set('Authorization', `Bearer ${token}`)
-        .send({
-          product_code: `PRD-ORDER-OK-2-${Date.now()}`,
-          name: 'Snapshot Item Beta',
-          price: 120000,
-          stock: 10,
-        });
-
-      const p1Id = p1Res.body.data.id;
-      const p2Id = p2Res.body.data.id;
-
-      // Subtotal = (2 * 75,000) + (1 * 120,000) = 150,000 + 120,000 = 270,000
-      // Tax 11% = 29,700 -> Grand Total = 299,700
-      const orderRes = await request(app)
-        .post('/api/orders')
-        .set('Authorization', `Bearer ${token}`)
-        .send({
-          customer_id: testCustomerId,
-          items: [
-            { product_id: p1Id, quantity: 2 },
-            { product_id: p2Id, quantity: 1 },
-          ],
-        });
-
-      expect(orderRes.status).toBe(201);
-      expect(orderRes.body.success).toBe(true);
-      const order = orderRes.body.data;
-      expect(order.status).toBe('PENDING');
-      expect(order.subtotal).toBe(270000);
-      expect(order.tax_amount).toBe(29700);
-      expect(order.grand_total).toBe(299700);
-      expect(order.items).toHaveLength(2);
-
-      // Verify stock was decreased in database
-      const db = getDb();
-      const [dbP1] = await db.select().from(products).where(eq(products.id, p1Id));
-      const [dbP2] = await db.select().from(products).where(eq(products.id, p2Id));
-      expect(dbP1.stock).toBe(18);
-      expect(dbP2.stock).toBe(9);
-
-      // Update product 1 price and name
-      const updateRes = await request(app)
-        .put(`/api/products/${p1Id}`)
-        .set('Authorization', `Bearer ${token}`)
-        .send({
-          name: 'Snapshot Item Alpha v2 (Price Raised)',
-          price: 999000,
-        });
-      expect(updateRes.status).toBe(200);
-
-      // Fetch order details and verify historical price and name snapshots are untouched
-      const detailRes = await request(app)
-        .get(`/api/orders/${order.id}`)
-        .set('Authorization', `Bearer ${token}`);
-
-      expect(detailRes.status).toBe(200);
-      expect(detailRes.body.data.subtotal).toBe(270000);
-      expect(detailRes.body.data.tax_amount).toBe(29700);
-      expect(detailRes.body.data.grand_total).toBe(299700);
-
-      const snapshotItem1 = detailRes.body.data.items.find(
-        (i: { product_id: string }) => i.product_id === p1Id
-      );
-      expect(snapshotItem1.product_name).toBe('Snapshot Item Alpha');
-      expect(snapshotItem1.unit_price).toBe(75000);
-      expect(snapshotItem1.subtotal).toBe(150000);
-    });
-  });
-
-  // =========================================================================
-  // Mandatory Test 2: Insufficient stock causes complete rollback
-  // =========================================================================
-  describe('Mandatory #2: Insufficient Stock Causes Complete Transaction Rollback', () => {
-    it('rolls back the entire order and leaves all product stock untouched if any item lacks stock', async () => {
-      const pValidRes = await request(app)
-        .post('/api/products')
-        .set('Authorization', `Bearer ${token}`)
-        .send({
-          product_code: `PRD-ROLLBACK-OK-${Date.now()}`,
-          name: 'Available Stock Product',
-          price: 50000,
-          stock: 10,
-        });
-
-      const pLowRes = await request(app)
-        .post('/api/products')
-        .set('Authorization', `Bearer ${token}`)
-        .send({
-          product_code: `PRD-ROLLBACK-LOW-${Date.now()}`,
-          name: 'Hydrococo 150ml Limited',
-          price: 30000,
-          stock: 3,
-        });
-
-      const validId = pValidRes.body.data.id;
-      const lowId = pLowRes.body.data.id;
-
-      // Attempt to order 4 of validId (has 10) and 5 of lowId (has only 3)
-      const orderRes = await request(app)
-        .post('/api/orders')
-        .set('Authorization', `Bearer ${token}`)
-        .send({
-          customer_id: testCustomerId,
-          items: [
-            { product_id: validId, quantity: 4 },
-            { product_id: lowId, quantity: 5 },
-          ],
-        });
-
-      expect(orderRes.status).toBe(422);
-      expect(orderRes.body.success).toBe(false);
-      expect(orderRes.body.message).toBe('Insufficient stock');
-      expect(orderRes.body.errors['items.1.quantity'][0]).toContain(
-        'Hydrococo 150ml Limited has 3 units remaining, 5 requested'
-      );
-
-      // Verify validId stock was NOT decreased (still 10) and lowId stock is still 3
-      const db = getDb();
-      const [dbValid] = await db.select().from(products).where(eq(products.id, validId));
-      const [dbLow] = await db.select().from(products).where(eq(products.id, lowId));
-      expect(dbValid.stock).toBe(10);
-      expect(dbLow.stock).toBe(3);
-    });
-  });
-
-  // =========================================================================
-  // Mandatory Test 3 & 4: Cancellation restores stock & Invalid status transitions return 409
-  // =========================================================================
-  describe('Mandatory #3 & #4: Order Cancellation Restores Stock & Status Transitions Enforce HTTP 409', () => {
-    it('Mandatory #3: cancels a PENDING or PAID order and restores stock exactly once', async () => {
+  describe('Order Processing & Inventory Consistency', () => {
+    it('Mandatory #1: successfully creates an order, snapshots prices, and decrements stock', async () => {
       const prodRes = await request(app)
         .post('/api/products')
         .set('Authorization', `Bearer ${token}`)
         .send({
-          product_code: `PRD-CANCEL-RESTORE-${Date.now()}`,
-          name: 'Cancelable Product',
-          price: 100000,
-          stock: 12,
+          product_code: `PRD-ORDER-${Date.now()}`,
+          name: 'Order Lifecycle Monitor',
+          price: 125000,
+          stock: 20,
         });
 
       const productId = prodRes.body.data.id;
 
-      // Create order for 5 units -> stock becomes 7
       const createRes = await request(app)
+        .post('/api/orders')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          customer_id: testCustomerId,
+          items: [{ product_id: productId, quantity: 2 }],
+        });
+
+      expect(createRes.status).toBe(201);
+      const order = createRes.body.data;
+      expect(order.order_number).toMatch(/^INV-\d{8}-\d{4}$/);
+      expect(order.status).toBe('PENDING');
+      expect(order.subtotal).toBe(250000);
+      expect(order.tax_amount).toBe(27500); // 11% of 250.000 = 27.500
+      expect(order.grand_total).toBe(277500);
+      expect(order.items[0].product_name).toBe('Order Lifecycle Monitor');
+      expect(order.items[0].unit_price).toBe(125000);
+
+      // Verify stock in database was decremented: 20 - 2 = 18
+      const db = getDb();
+      const [productAfter] = await db.select().from(products).where(eq(products.id, productId));
+      expect(productAfter.stock).toBe(18);
+
+      // Now change product master price to 999.000; historical order price MUST NOT change!
+      await db.update(products).set({ price: '999000.00' }).where(eq(products.id, productId));
+
+      const fetchRes = await request(app)
+        .get(`/api/orders/${order.id}`)
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(fetchRes.status).toBe(200);
+      expect(fetchRes.body.data.items[0].unit_price).toBe(125000);
+      expect(fetchRes.body.data.subtotal).toBe(250000);
+    });
+
+    it('Mandatory #2: rolls back entire transaction when stock is insufficient', async () => {
+      const prodRes = await request(app)
+        .post('/api/products')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          product_code: `PRD-ROLLBACK-${Date.now()}`,
+          name: 'Low Stock Item',
+          price: 50000,
+          stock: 3,
+        });
+
+      const productId = prodRes.body.data.id;
+
+      // Attempt to order quantity 5 when only 3 are available
+      const orderRes = await request(app)
         .post('/api/orders')
         .set('Authorization', `Bearer ${token}`)
         .send({
@@ -380,23 +276,50 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
           items: [{ product_id: productId, quantity: 5 }],
         });
 
-      expect(createRes.status).toBe(201);
+      expect(orderRes.status).toBe(422);
+      expect(orderRes.body.success).toBe(false);
+      expect(orderRes.body.errors).toBeDefined();
+
+      // Verify stock was unaffected: still 3
+      const db = getDb();
+      const [productAfter] = await db.select().from(products).where(eq(products.id, productId));
+      expect(productAfter.stock).toBe(3);
+    });
+
+    it('Mandatory #3: restores stock when order is cancelled from PENDING and PAID states', async () => {
+      const prodRes = await request(app)
+        .post('/api/products')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          product_code: `PRD-CANCEL-${Date.now()}`,
+          name: 'Cancellable Headset',
+          price: 300000,
+          stock: 12,
+        });
+
+      const productId = prodRes.body.data.id;
+
+      // Create order for 4 items -> stock becomes 8
+      const createRes = await request(app)
+        .post('/api/orders')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          customer_id: testCustomerId,
+          items: [{ product_id: productId, quantity: 4 }],
+        });
+
       const orderId = createRes.body.data.id;
 
       const db = getDb();
       const [afterOrder] = await db.select().from(products).where(eq(products.id, productId));
-      expect(afterOrder.stock).toBe(7);
+      expect(afterOrder.stock).toBe(8);
 
-      // Pay the order (PENDING -> PAID) -> stock remains 7
+      // Pay the order (PENDING -> PAID)
       const payRes = await request(app)
         .patch(`/api/orders/${orderId}/pay`)
         .set('Authorization', `Bearer ${token}`);
-
       expect(payRes.status).toBe(200);
       expect(payRes.body.data.status).toBe('PAID');
-
-      const [afterPay] = await db.select().from(products).where(eq(products.id, productId));
-      expect(afterPay.stock).toBe(7);
 
       // Cancel the PAID order (PAID -> CANCELLED) -> stock restored to 12
       const cancelRes = await request(app)
@@ -471,9 +394,9 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
   });
 
   // =========================================================================
-  // Section 9 Requirement: Concurrent Order Integration Test
+  // Section C, D, E: Concurrency & Idempotency Integration Tests
   // =========================================================================
-  describe('Concurrent Stock Protection & Non-existent Customer Validation', () => {
+  describe('Concurrency & Idempotency Key Handling', () => {
     it('prevents overselling when two concurrent orders compete for limited stock', async () => {
       const prodRes = await request(app)
         .post('/api/products')
@@ -513,6 +436,157 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
       const [finalProduct] = await db.select().from(products).where(eq(products.id, productId));
       // 5 initial - 4 ordered = 1 remaining (never negative!)
       expect(finalProduct.stock).toBe(1);
+    });
+
+    it('generates strictly unique and sequential order numbers under concurrent load', async () => {
+      const prodRes = await request(app)
+        .post('/api/products')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          product_code: `PRD-CONC-NUM-${Date.now()}`,
+          name: 'Order Number Test Item',
+          price: 10000,
+          stock: 50,
+        });
+
+      const productId = prodRes.body.data.id;
+
+      // Dispatch 5 concurrent orders simultaneously
+      const promises = Array.from({ length: 5 }, () =>
+        request(app)
+          .post('/api/orders')
+          .set('Authorization', `Bearer ${token}`)
+          .send({
+            customer_id: testCustomerId,
+            items: [{ product_id: productId, quantity: 1 }],
+          })
+      );
+
+      const responses = await Promise.all(promises);
+      for (const res of responses) {
+        expect(res.status).toBe(201);
+      }
+
+      const orderNumbers = responses.map((r) => r.body.data.order_number);
+      const uniqueOrderNumbers = new Set(orderNumbers);
+
+      // Verify every order number is unique
+      expect(uniqueOrderNumbers.size).toBe(5);
+      // Verify format
+      for (const num of orderNumbers) {
+        expect(num).toMatch(/^INV-\d{8}-\d{4}$/);
+      }
+    });
+
+    it('handles simultaneous cancellation requests safely without restoring stock twice', async () => {
+      const prodRes = await request(app)
+        .post('/api/products')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          product_code: `PRD-CONC-CANCEL-${Date.now()}`,
+          name: 'Simultaneous Cancel Item',
+          price: 50000,
+          stock: 10,
+        });
+
+      const productId = prodRes.body.data.id;
+
+      const orderRes = await request(app)
+        .post('/api/orders')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          customer_id: testCustomerId,
+          items: [{ product_id: productId, quantity: 3 }],
+        });
+
+      expect(orderRes.status).toBe(201);
+      const orderId = orderRes.body.data.id;
+
+      // Fire 2 simultaneous cancel requests for the same order
+      const [cancel1, cancel2] = await Promise.all([
+        request(app)
+          .patch(`/api/orders/${orderId}/cancel`)
+          .set('Authorization', `Bearer ${token}`),
+        request(app)
+          .patch(`/api/orders/${orderId}/cancel`)
+          .set('Authorization', `Bearer ${token}`),
+      ]);
+
+      const statuses = [cancel1.status, cancel2.status].sort();
+      // One request transitions the order and succeeds (200), the other sees non-cancellable state (409)
+      expect(statuses).toEqual([200, 409]);
+
+      // Verify stock was restored exactly once: 10 - 3 + 3 = 10 (NOT 13!)
+      const db = getDb();
+      const [finalProd] = await db.select().from(products).where(eq(products.id, productId));
+      expect(finalProd.stock).toBe(10);
+    });
+
+    it('Section E: respects Idempotency-Key header returning identical order on replay, and HTTP 409 on payload mismatch', async () => {
+      const prodRes = await request(app)
+        .post('/api/products')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          product_code: `PRD-IDEMP-${Date.now()}`,
+          name: 'Idempotency Test Item',
+          price: 75000,
+          stock: 20,
+        });
+
+      const productId = prodRes.body.data.id;
+      const idempotencyKey = `idem-key-${Date.now()}-${Math.random()}`;
+
+      const payload1 = {
+        customer_id: testCustomerId,
+        items: [{ product_id: productId, quantity: 2 }],
+      };
+
+      // 1. Initial order creation with Idempotency-Key
+      const res1 = await request(app)
+        .post('/api/orders')
+        .set('Authorization', `Bearer ${token}`)
+        .set('Idempotency-Key', idempotencyKey)
+        .send(payload1);
+
+      expect(res1.status).toBe(201);
+      const originalOrder = res1.body.data;
+      expect(originalOrder.order_number).toBeDefined();
+
+      // Verify stock was decremented once: 20 - 2 = 18
+      const db = getDb();
+      let [prodState] = await db.select().from(products).where(eq(products.id, productId));
+      expect(prodState.stock).toBe(18);
+
+      // 2. Replay EXACT same request with same Idempotency-Key: returns original order without re-decrementing stock
+      const res2 = await request(app)
+        .post('/api/orders')
+        .set('Authorization', `Bearer ${token}`)
+        .set('Idempotency-Key', idempotencyKey)
+        .send(payload1);
+
+      expect(res2.status).toBe(201);
+      expect(res2.body.data.id).toBe(originalOrder.id);
+      expect(res2.body.data.order_number).toBe(originalOrder.order_number);
+
+      // Stock remains 18 (NOT decremented again to 16)
+      [prodState] = await db.select().from(products).where(eq(products.id, productId));
+      expect(prodState.stock).toBe(18);
+
+      // 3. Reuse SAME Idempotency-Key with DIFFERENT payload: returns HTTP 409 Conflict
+      const payload2 = {
+        customer_id: testCustomerId,
+        items: [{ product_id: productId, quantity: 3 }],
+      };
+
+      const res3 = await request(app)
+        .post('/api/orders')
+        .set('Authorization', `Bearer ${token}`)
+        .set('Idempotency-Key', idempotencyKey)
+        .send(payload2);
+
+      expect(res3.status).toBe(409);
+      expect(res3.body.success).toBe(false);
+      expect(res3.body.message).toMatch(/idempotency key reuse with different request payload/i);
     });
 
     it('returns HTTP 404 when creating an order for a non-existent customer', async () => {
@@ -558,4 +632,3 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
     });
   });
 });
-

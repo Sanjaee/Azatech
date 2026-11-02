@@ -17,5 +17,42 @@ services:
       timeout: 5s
       retries: 5
 
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: azatech_backend
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    environment:
+      PORT: 4000
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-azatech}:${POSTGRES_PASSWORD:-azatech_password}@postgres:5432/${POSTGRES_DB:-azatech_oms}
+      JWT_SECRET: ${JWT_SECRET:-azatech_production_super_secret_jwt_key_2026_x99}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-admin@azatech.id}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-Admin@Azatech2026!}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: azatech_frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: 3000
+      NODE_ENV: production
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+      BACKEND_INTERNAL_URL: http://backend:4000
+      NEXT_PUBLIC_BACKEND_URL: http://localhost:4000
+    depends_on:
+      - backend
+
 volumes:
   pgdata:
