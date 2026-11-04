@@ -293,8 +293,8 @@ export default function CreateOrderPage() {
                           : 'bg-slate-50/40'
                       )}
                     >
-                      <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-start">
-                        {/* Product Selector (5 cols) */}
+                      <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end">
+                        {/* 1. Product Selector (5 cols) */}
                         <div className="sm:col-span-5">
                           <FormField
                             control={form.control}
@@ -389,36 +389,9 @@ export default function CreateOrderPage() {
                               </FormItem>
                             )}
                           />
-
-                          {selectedProduct && (
-                            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                              <span>
-                                Unit Price:{' '}
-                                <strong className="text-slate-800">
-                                  {formatRupiah(selectedProduct.price)}
-                                </strong>
-                              </span>
-                              <span>•</span>
-                              <span>
-                                Available Stock:
-                                <Badge
-                                  variant={
-                                    selectedProduct.stock === 0
-                                      ? 'danger'
-                                      : selectedProduct.stock < currentQty
-                                      ? 'warning'
-                                      : 'success'
-                                  }
-                                  className="ml-1 text-[11px]"
-                                >
-                                  {selectedProduct.stock} units
-                                </Badge>
-                              </span>
-                            </div>
-                          )}
                         </div>
 
-                        {/* Quantity Input (2 cols) */}
+                        {/* 2. Quantity Input (2 cols) */}
                         <div className="sm:col-span-2">
                           <FormField
                             control={form.control}
@@ -448,32 +421,32 @@ export default function CreateOrderPage() {
                           />
                         </div>
 
-                        {/* Item Subtotal (4 cols) */}
+                        {/* 3. Item Subtotal Display Box (4 cols) */}
                         <div className="sm:col-span-4">
                           <div className="space-y-1.5">
-                            <span className="text-xs font-medium text-slate-600 block">
+                            <label className="text-xs font-medium text-slate-600 block">
                               Item Subtotal
-                            </span>
+                            </label>
                             <div className="flex h-10 items-center justify-end px-3 rounded-md border border-input bg-white text-sm font-bold text-slate-900 shadow-sm">
                               {formatRupiah(lineSubtotal)}
                             </div>
                           </div>
                         </div>
 
-                        {/* Delete Action (1 col) */}
+                        {/* 4. Delete Action Button (1 col) */}
                         <div className="sm:col-span-1">
                           <div className="space-y-1.5">
                             <span className="text-xs font-medium text-transparent select-none hidden sm:block">
-                              Action
+                              &nbsp;
                             </span>
                             <div className="flex h-10 items-center justify-center">
                               <Button
                                 type="button"
-                                variant="ghost"
+                                variant="outline"
                                 size="icon"
                                 disabled={fields.length <= 1 || createOrder.isPending}
                                 onClick={() => remove(index)}
-                                className="h-9 w-9 text-slate-400 hover:text-rose-600 hover:bg-rose-50"
+                                className="h-10 w-10 text-slate-400 hover:text-rose-600 hover:bg-rose-50 border-slate-200"
                                 title="Remove item"
                               >
                                 <Trash2 className="h-4 w-4" />
@@ -482,6 +455,41 @@ export default function CreateOrderPage() {
                           </div>
                         </div>
                       </div>
+
+                      {/* Product Details & Stock Badge: Cleanly placed below the aligned inputs */}
+                      {selectedProduct && (
+                        <div className="mt-3 pt-2.5 border-t border-slate-200/60 flex flex-wrap items-center gap-3 text-xs text-slate-500">
+                          <span>
+                            Kode:{' '}
+                            <span className="font-mono font-medium text-slate-700">
+                              {selectedProduct.product_code}
+                            </span>
+                          </span>
+                          <span>•</span>
+                          <span>
+                            Unit Price:{' '}
+                            <strong className="text-slate-800">
+                              {formatRupiah(selectedProduct.price)}
+                            </strong>
+                          </span>
+                          <span>•</span>
+                          <span className="flex items-center gap-1.5">
+                            Available Stock:
+                            <Badge
+                              variant={
+                                selectedProduct.stock === 0
+                                  ? 'danger'
+                                  : selectedProduct.stock < currentQty
+                                  ? 'warning'
+                                  : 'success'
+                              }
+                              className="text-[11px] px-2 py-0.5"
+                            >
+                              {selectedProduct.stock} units
+                            </Badge>
+                          </span>
+                        </div>
+                      )}
                     </div>
                   );
                 })}
