@@ -8,7 +8,7 @@ import { products, customers, orders, orderCounters, orderIdempotency } from '..
 import { env } from '../src/config/env';
 import { calculateVariantCTax } from '../src/utils/money';
 
-describe('Azatech OMS — Variant C Integration Tests', () => {
+describe('Azatech OMS — Pengujian Integrasi Varian C (Sistem Manajemen Order)', () => {
   let token: string;
   let testCustomerId: string;
 
@@ -50,8 +50,8 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
   // =========================================================================
   // Mandatory Test 6 & Additional Auth Tests: Protected endpoints & JWT auth
   // =========================================================================
-  describe('Authentication & Authorization', () => {
-    it('Mandatory #6: rejects requests to protected endpoints without a token (HTTP 401)', async () => {
+  describe('1. Autentikasi & Otorisasi JWT', () => {
+    it('Wajib #6: Menolak request ke endpoint terproteksi jika tanpa token JWT (HTTP 401)', async () => {
       const resProducts = await request(app).get('/api/products');
       expect(resProducts.status).toBe(401);
       expect(resProducts.body.success).toBe(false);
@@ -66,7 +66,7 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
       expect(resCreateOrder.status).toBe(401);
     });
 
-    it('rejects requests with an invalid or tampered JWT token (HTTP 401)', async () => {
+    it('Menolak request dengan token JWT yang tidak valid atau telah dimanipulasi (HTTP 401)', async () => {
       const res = await request(app)
         .get('/api/products')
         .set('Authorization', 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.invalid.signature');
@@ -75,7 +75,7 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
       expect(res.body.success).toBe(false);
     });
 
-    it('rejects login with invalid credentials (HTTP 401)', async () => {
+    it('Menolak login jika email atau password salah (HTTP 401)', async () => {
       const res = await request(app)
         .post('/api/auth/login')
         .send({
@@ -92,8 +92,8 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
   // =========================================================================
   // Additional Tests: Products uniqueness, pagination, and search
   // =========================================================================
-  describe('Products & Customers APIs', () => {
-    it('creates products and enforces unique product_code constraint (HTTP 409)', async () => {
+  describe('2. Endpoint Produk & Pelanggan', () => {
+    it('Berhasil membuat produk baru dan mencegah duplikasi kode produk (HTTP 409)', async () => {
       const uniqueCode = `PRD-TEST-${Date.now()}`;
 
       const res1 = await request(app)
@@ -124,7 +124,7 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
       expect(res2.body.message).toMatch(/already in use|already exists/i);
     });
 
-    it('supports search, stock filter, and pagination on GET /api/products', async () => {
+    it('Mendukung pencarian nama/kode, filter stok, dan pagination pada GET /api/products', async () => {
       const res = await request(app)
         .get('/api/products?page=1&per_page=5&search=Keyboard')
         .set('Authorization', `Bearer ${token}`);
@@ -136,7 +136,7 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
       expect(res.body.meta.per_page).toBe(5);
     });
 
-    it('rejects invalid product quantity or negative price (HTTP 422)', async () => {
+    it('Validasi Zod: Menolak produk dengan harga negatif atau stok tidak valid (HTTP 422)', async () => {
       const res = await request(app)
         .post('/api/products')
         .set('Authorization', `Bearer ${token}`)
@@ -155,8 +155,8 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
   // =========================================================================
   // Mandatory Test 5: Variant C VAT calculation and rounding
   // =========================================================================
-  describe('Variant C VAT Calculation (11% rounded UP to nearest Rp 100)', () => {
-    it('Mandatory #5: verifies exact CEILING rounding on tax_amount', async () => {
+  describe('3. Perhitungan Pajak Varian C (PPN 11% Dibulatkan ke Atas ke Kelipatan Rp 100 Terdekat)', () => {
+    it('Wajib #5: Memverifikasi rumus pembulatan ke atas PPN 11% ke kelipatan Rp 100 terdekat', async () => {
       // Test cases from specification:
       // Subtotal 155.450 -> raw 11% = 17.099,50 -> CEIL to Rp 100 = 17.100
       const test1 = calculateVariantCTax(155450);
@@ -205,8 +205,8 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
   // =========================================================================
   // Mandatory Tests 1, 2, 3, 4: Order Lifecycle & Stock Conservation
   // =========================================================================
-  describe('Order Processing & Inventory Consistency', () => {
-    it('Mandatory #1: successfully creates an order, snapshots prices, and decrements stock', async () => {
+  describe('4. Siklus Hidup Order & Konsistensi Stok (Transaksi ACID)', () => {
+    it('Wajib #1: Berhasil membuat order, snapshot harga produk, dan memotong stok di database', async () => {
       const prodRes = await request(app)
         .post('/api/products')
         .set('Authorization', `Bearer ${token}`)
@@ -254,7 +254,7 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
       expect(fetchRes.body.data.subtotal).toBe(250000);
     });
 
-    it('Mandatory #2: rolls back entire transaction when stock is insufficient', async () => {
+    it('Wajib #2: Melakukan rollback seluruh transaksi jika stok produk tidak mencukupi (HTTP 422)', async () => {
       const prodRes = await request(app)
         .post('/api/products')
         .set('Authorization', `Bearer ${token}`)
@@ -286,7 +286,7 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
       expect(productAfter.stock).toBe(3);
     });
 
-    it('Mandatory #3: restores stock when order is cancelled from PENDING and PAID states', async () => {
+    it('Wajib #3: Mengembalikan stok produk otomatis saat order dibatalkan dari status PENDING atau PAID', async () => {
       const prodRes = await request(app)
         .post('/api/products')
         .set('Authorization', `Bearer ${token}`)
@@ -333,7 +333,7 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
       expect(afterCancel.stock).toBe(12);
     });
 
-    it('Mandatory #4: returns HTTP 409 for invalid transitions and prevents duplicate cancellation from restoring stock twice', async () => {
+    it('Wajib #4: Menolak transisi status ilegal (HTTP 409) dan mencegah pembatalan ganda agar stok tidak bertambah 2x', async () => {
       const prodRes = await request(app)
         .post('/api/products')
         .set('Authorization', `Bearer ${token}`)
@@ -396,8 +396,8 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
   // =========================================================================
   // Section C, D, E: Concurrency & Idempotency Integration Tests
   // =========================================================================
-  describe('Concurrency & Idempotency Key Handling', () => {
-    it('prevents overselling when two concurrent orders compete for limited stock', async () => {
+  describe('5. Concurrency (Pencegahan Race Condition) & Idempotency Key', () => {
+    it('Anti-Overselling: Mencegah stok minus saat dua order dikirim bersamaan berebut sisa stok (Pessimistic Lock)', async () => {
       const prodRes = await request(app)
         .post('/api/products')
         .set('Authorization', `Bearer ${token}`)
@@ -438,7 +438,7 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
       expect(finalProduct.stock).toBe(1);
     });
 
-    it('generates strictly unique and sequential order numbers under concurrent load', async () => {
+    it('Nomor Invoice Unik: Menghasilkan format INV-YYYYMMDD-XXXX yang unik dan berurutan saat beban bersamaan', async () => {
       const prodRes = await request(app)
         .post('/api/products')
         .set('Authorization', `Bearer ${token}`)
@@ -478,7 +478,7 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
       }
     });
 
-    it('handles simultaneous cancellation requests safely without restoring stock twice', async () => {
+    it('Pembatalan Simultan: Menangani dua request cancel bersamaan secara aman tanpa merestorasi stok ganda', async () => {
       const prodRes = await request(app)
         .post('/api/products')
         .set('Authorization', `Bearer ${token}`)
@@ -522,7 +522,7 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
       expect(finalProd.stock).toBe(10);
     });
 
-    it('Section E: respects Idempotency-Key header returning identical order on replay, and HTTP 409 on payload mismatch', async () => {
+    it('Bagian E: Mendukung header Idempotency-Key untuk replay order identik dan mencegah double-order', async () => {
       const prodRes = await request(app)
         .post('/api/products')
         .set('Authorization', `Bearer ${token}`)
@@ -589,7 +589,7 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
       expect(res3.body.message).toMatch(/idempotency key reuse with different request payload/i);
     });
 
-    it('returns HTTP 404 when creating an order for a non-existent customer', async () => {
+    it('Menolak pembuatan order dan mengembalikan HTTP 404 jika customer ID tidak ditemukan (HTTP 404)', async () => {
       const db = getDb();
       const [anyProduct] = await db.select().from(products).limit(1);
 
@@ -605,7 +605,7 @@ describe('Azatech OMS — Variant C Integration Tests', () => {
       expect(res.body.success).toBe(false);
     });
 
-    it('rejects client attempts to inject unit_price, subtotal, or tax_amount into POST /api/orders', async () => {
+    it('Anti-Tampering: Menolak jika client mencoba memanipulasi mengirimkan harga atau subtotal sendiri (HTTP 422)', async () => {
       const db = getDb();
       const [anyProduct] = await db.select().from(products).limit(1);
 
