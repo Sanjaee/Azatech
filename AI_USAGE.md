@@ -1,42 +1,62 @@
-# AI Usage Disclosure (`AI_USAGE.md`)
+# Pengungkapan Penggunaan AI (`AI_USAGE.md`)
 
-In accordance with the assessment guidelines, this document transparently records how AI tools were used during the development of the Azatech Order Management System (Variant C).
-
----
-
-## 1. AI Tools Used
-
-- **Antigravity (Google DeepMind Coding Agent)** — Used for project scaffolding, Drizzle ORM schema generation, Express module implementation, Next.js App Router BFF proxy & UI implementation, and integration test authoring.
+Sesuai dengan panduan penilaian teknis **Azatech Fullstack Developer Technical Test (Varian C: Order Management System)**, dokumen ini mencatat secara transparan dan jujur seluruh penggunaan perangkat bantu kecerdasan buatan (*AI tools*) selama pengerjaan proyek ini.
 
 ---
 
-## 2. Tasks Assisted by AI
+## 1. Perangkat Bantu AI yang Digunakan
 
-1. **Monorepo & Build Configuration:** Setting up independent `backend/` and `frontend/` TypeScript strict-mode configurations, Tailwind CSS tokens, and Vercel serverless routing (`backend/api/index.ts`, `backend/vercel.json`).
-2. **Database Schema & Seeder Authoring:** Translating the 5 required tables (`users`, `products`, `customers`, `orders`, `order_items`) into Drizzle ORM definitions (`backend/src/db/schema/index.ts`) with `NUMERIC(15, 2)` precision, foreign keys, indexes, and `CHECK` constraints, plus the idempotent seeder (`backend/src/db/seed.ts`).
-3. **Transactional Order Engine & Variant C Math:** Implementing `calculateVariantCTaxCents` (`backend/src/utils/money.ts`) using exact `BigInt` integer-cent arithmetic and `OrdersService.createOrder` / `payOrder` / `cancelOrder` (`backend/src/modules/orders/orders.service.ts`) with `SELECT ... FOR UPDATE` row locking.
-4. **Next.js BFF & shadcn/ui Dashboard:** Building the HttpOnly cookie authentication routes (`frontend/src/app/api/auth/*`), the allowlisted BFF proxy (`frontend/src/app/api/backend/[...path]/route.ts`), and the 6 required dashboard pages.
-5. **Automated Integration Test Suite:** Writing the 13 Supertest + Vitest integration tests in `backend/tests/orders.integration.test.ts`.
+- **Antigravity (Google DeepMind Coding Agent)** — Digunakan sebagai asisten pemrograman berpasangan (*pair programmer*) untuk *scaffolding* monorepo, pembuatan skema Drizzle ORM, implementasi modul Express REST API, pembuatan antarmuka Next.js App Router (BFF proxy & dashboard UI), serta penyusunan skenario automated integration test.
 
 ---
 
-## 3. Representative Prompts Used
+## 2. Bagian Proyek yang Dibantu oleh AI
 
-1. > *"Create the Drizzle ORM PostgreSQL schema in `backend/src/db/schema/index.ts` for `users`, `products`, `customers`, `orders`, and `order_items` with `NUMERIC(15, 2)` monetary columns, `order_status` enum (`PENDING`, `PAID`, `CANCELLED`), indexes on search/status/date columns, and database `CHECK` constraints ensuring positive prices and non-negative stock."*
-2. > *"Implement `OrdersService.createOrder` in `backend/src/modules/orders/orders.service.ts` following Variant C: reject client-submitted financial fields, sort product IDs in ascending order before `SELECT ... FOR UPDATE`, validate stock after locking, compute Variant C 11% PPN rounded up to the nearest Rp100 (`CEILING(subtotal * 0.11 / 100) * 100`), generate `INV-YYYYMMDD-XXXX` order numbers safely under concurrency, snapshot product name/code/price in `order_items`, and roll back completely if any item fails."*
-3. > *"Implement a secure Next.js App Router BFF in `frontend/src/app/api/auth/*` and `frontend/src/app/api/backend/[...path]/route.ts` that stores the Express JWT in an `HttpOnly`, `SameSite=Lax` cookie, strips the raw token from browser responses, validates `Origin` and `X-Requested-With` CSRF headers on mutations, and enforces an explicit allowlist of permitted backend paths and HTTP methods."*
-4. > *"Write real PostgreSQL integration tests in `backend/tests/orders.integration.test.ts` covering all 6 mandatory scenarios plus concurrent order requests competing for limited stock, duplicate cancellation protection, and historical price snapshot immutability."*
+1. **Konfigurasi Monorepo & Lingkungan Build:**
+   Menyiapkan konfigurasi TypeScript *strict-mode* terpisah untuk `backend/` dan `frontend/`, penyesuaian token Tailwind CSS, serta integrasi Vercel serverless routing (`backend/api/index.ts`, `backend/vercel.json`) dan Dockerfile multi-stage.
+2. **Skema Database & Seeder Idempoten:**
+   Menerjemahkan 5 tabel utama (`users`, `products`, `customers`, `orders`, `order_items`) ditambah 2 tabel sistem (`order_counters`, `order_idempotency`) ke dalam Drizzle ORM ([`backend/src/db/schema/index.ts`](backend/src/db/schema/index.ts)) lengkap dengan presisi `NUMERIC(15, 2)`, relasi foreign key, indeks pencarian, dan *database constraint* `CHECK (price > 0)` dan `CHECK (stock >= 0)`.
+3. **Logika Transaksional & Formula Varian C:**
+   Menyusun fungsi `calculateVariantCTaxCents` ([`backend/src/utils/money.ts`](backend/src/utils/money.ts)) menggunakan kalkulasi integer-cent rupiah (*Ceiling Rounding* PPN 11% ke kelipatan Rp 100 terdekat) serta transaksi ACID pada `OrdersService.createOrder`, `payOrder`, dan `cancelOrder` dengan *pessimistic row-level locking* (`SELECT ... FOR UPDATE`).
+4. **Next.js Backend-For-Frontend (BFF) & Komponen Dashboard UI:**
+   Membangun session handler HttpOnly cookie ([`frontend/src/app/api/auth/*`](frontend/src/app/api/auth/)), proxy aman dengan proteksi CSRF ([`frontend/src/app/api/backend/[...path]/route.ts`](frontend/src/app/api/backend/[...path]/route.ts)), serta halaman antarmuka pengguna: Login, Daftar Produk, Buat Order (form interaktif), dan Riwayat/Detail Order.
+5. **Penyusunan Integration Test Suite:**
+   Menyusun 20 skenario pengujian integrasi Supertest + Vitest ([`backend/tests/orders.integration.test.ts`](backend/tests/orders.integration.test.ts)) yang memvalidasi seluruh ketentuan teknis langsung ke database PostgreSQL nyata.
 
 ---
 
-## 4. Manual Review, Verification, and Modifications
+## 3. Contoh Prompt Utama yang Digunakan (*Disalin Apa Adanya*)
 
-Every file and business rule was verified against the specification:
+Berikut adalah 4 contoh representatif prompt utama yang diberikan selama pengerjaan:
 
-- **Variant C PPN Rounding Verification:** Manually verified the integer-cent ceiling formula `(subtotalCents * 11n + 999_999n) / 1_000_000n * 10_000n` against boundary cases:
-  - `Rp150,000` $\rightarrow$ `16,500` tax, `166,500` grand total.
-  - `Rp150,010` $\rightarrow$ `16,501.10` raw tax $\rightarrow$ `16,600` rounded tax, `166,610` grand total.
-- **Row-Level Locking & Rollback Verification:** Verified via `backend/tests/orders.integration.test.ts` that when a multi-item order contains one valid product and one under-stocked product, the valid product's stock remains completely unchanged after the `422` response.
-- **Strict TypeScript & Build Verification:** Executed `tsc --noEmit`, `vitest run`, `npm run build` on `backend/`, and `next build` on `frontend/` to confirm zero type errors, zero build errors, and 100% passing integration tests.
+1. **Prompt Pembuatan Skema Database & Validasi Zod:**
+   > *"Create the Drizzle ORM PostgreSQL schema in `backend/src/db/schema/index.ts` for `users`, `products`, `customers`, `orders`, and `order_items` with `NUMERIC(15, 2)` monetary columns, `order_status` enum (`PENDING`, `PAID`, `CANCELLED`), indexes on search/status/date columns, and database `CHECK` constraints ensuring positive prices and non-negative stock."*
 
-41: - **Concurrency & Idempotency Key Extension:** Prompted the addition of the `order_counters` table with atomic `INSERT ON CONFLICT DO UPDATE RETURNING` in `Asia/Jakarta` timezone and the `order_idempotency` table with SHA-256 payload verification. All 17 integration tests run against real PostgreSQL and passed with 100% success.
+2. **Prompt Mesin Transaksi Order & Logika Varian C:**
+   > *"Implement `OrdersService.createOrder` in `backend/src/modules/orders/orders.service.ts` following Variant C: reject client-submitted financial fields, sort product IDs in ascending order before `SELECT ... FOR UPDATE`, validate stock after locking, compute Variant C 11% PPN rounded up to the nearest Rp100 (`CEILING(subtotal * 0.11 / 100) * 100`), generate `INV-YYYYMMDD-XXXX` order numbers safely under concurrency, snapshot product name/code/price in `order_items`, and roll back completely if any item fails."*
+
+3. **Prompt Keamanan BFF Next.js & Cookie HttpOnly:**
+   > *"Implement a secure Next.js App Router BFF in `frontend/src/app/api/auth/*` and `frontend/src/app/api/backend/[...path]/route.ts` that stores the Express JWT in an `HttpOnly`, `SameSite=Lax` cookie, strips the raw token from browser responses, validates `Origin` and `X-Requested-With` CSRF headers on mutations, and enforces an explicit allowlist of permitted backend paths and HTTP methods."*
+
+4. **Prompt Automated Integration Test:**
+   > *"Write real PostgreSQL integration tests in `backend/tests/orders.integration.test.ts` covering all 6 mandatory scenarios plus concurrent order requests competing for limited stock, duplicate cancellation protection, and historical price snapshot immutability."*
+
+---
+
+## 4. Bagian Kode yang Ditulis, Ditinjau, dan Diubah Sendiri
+
+Setiap berkas kode dan aturan bisnis diuji, ditinjau secara mendalam (*code review*), dan disesuaikan langsung dengan spesifikasi dokumen Azatech:
+
+1. **Verifikasi Manual Rumus Pembulatan PPN Varian C:**
+   Menguji secara manual akurasi rumus integer *ceiling division* `(subtotalCents * 11n + 999_999n) / 1_000_000n * 10_000n` terhadap angka-angka kasus batas:
+   - Subtotal `Rp 150.000` $\rightarrow$ PPN `Rp 16.500`, Grand Total `Rp 166.500`.
+   - Subtotal `Rp 150.010` $\rightarrow$ PPN mentah `Rp 16.501,10` $\rightarrow$ dibulatkan ke atas menjadi `Rp 16.600`, Grand Total `Rp 166.610`.
+   - Subtotal `Rp 155.450` $\rightarrow$ PPN mentah `Rp 17.099,50` $\rightarrow$ dibulatkan ke atas menjadi `Rp 17.100`, Grand Total `Rp 172.550`.
+2. **Penyempurnaan Penanganan Concurrency & Idempotency Key:**
+   Menambahkan implementasi tabel `order_counters` dengan atomik `INSERT ON CONFLICT DO UPDATE RETURNING` berbasis zona waktu `Asia/Jakarta`, serta penanganan `Idempotency-Key` dengan hashing SHA-256 payload untuk mencegah pesanan ganda saat koneksi jaringan tidak stabil.
+3. **Perbaikan Masalah Filter Tanggal (Date-Only Edge Case):**
+   Memperbaiki bug query pada `listOrders` di mana format tanggal `YYYY-MM-DD` dari kalender frontend terpotong pada jam `00:00:00`, dinormalisasi agar mencakup hingga akhir hari (`23:59:59.999`).
+4. **Penyelarasan Tampilan UI Line Items:**
+   Menata ulang grid input pada form pembuatan pesanan (`frontend/src/app/(dashboard)/orders/new/page.tsx`) agar kolom *Product*, *Quantity*, *Item Subtotal*, dan tombol *Delete* sejajar presisi secara horizontal (`items-end`, tinggi seragam `h-10`), dan memisahkan badge harga/stok produk ke baris informasi di bawahnya.
+5. **Verifikasi Penuh Build & Test Suite:**
+   Menjalankan `npm run typecheck`, `npm run build`, `npm run test` di lokal dan Docker Compose untuk memastikan 0 kesalahan TypeScript, 0 kesalahan build, dan 20 dari 20 tes integrasi lulus 100%.

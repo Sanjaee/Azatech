@@ -1,17 +1,17 @@
-# Technical & Architectural Decisions (`DECISIONS.md`)
+# Keputusan Teknis & Arsitektur (`DECISIONS.md`)
 
-This document answers the four required engineering questions using the actual implementation details, source files, and functions in this repository.
+Dokumen ini menjawab 4 pertanyaan rekayasa perangkat lunak wajib dari panduan **Technical Test Azatech (Varian C: Order Management System)** secara lugas, transparan, dan mengacu langsung pada kode sumber serta implementasi nyata di repositori ini.
 
 ---
 
-## 1. How does the application prevent negative stock during concurrent orders?
+## 1. Bagaimana Anda mencegah stok minus saat dua order masuk bersamaan?
 
-### Implementation Strategy: Deterministic Pessimistic Row-Level Locking + Atomic Conditional Decrement + Database CHECK Constraint
+### Strategi Implementasi: *Deterministic Pessimistic Row-Level Locking* + *Atomic Conditional Decrement* + *Database CHECK Constraint*
 
-Negative stock during concurrent order requests is prevented through three defense-in-depth layers implemented in [`backend/src/modules/orders/orders.service.ts`](backend/src/modules/orders/orders.service.ts) (`OrdersService.createOrder`) and [`backend/src/db/schema/index.ts`](backend/src/db/schema/index.ts):
+Pencegahan stok minus saat terjadi lonjakan order secara bersamaan (*high concurrency race condition*) ditangani melalui 3 lapisan perlindungan (*defense-in-depth*) pada file [`backend/src/modules/orders/orders.service.ts`](backend/src/modules/orders/orders.service.ts) (fungsi `OrdersService.createOrder`) dan skema database [`backend/src/db/schema/index.ts`](backend/src/db/schema/index.ts):
 
-1. **Deterministic Ascending Lock Ordering (Deadlock Prevention):**
-   Inside the `db.transaction(async (tx) => { ... })` block in `OrdersService.createOrder`, all requested `product_id` UUIDs are first sorted lexicographically before acquiring locks:
+1. **Pengurutan Kunci Deterministik (Pencegahan Deadlock):**
+   Di dalam blok transaksi `db.transaction(async (tx) => { ... })` pada `OrdersService.createOrder`, seluruh ID produk (`product_id`) yang dipesan diurutkan secara alfabetis (ascending) sebelum proses penguncian baris dilakukan:
    ```ts
    const sortedProductIds = [...input.items.map((i) => i.product_id)].sort((a, b) =>
      a.localeCompare(b)
@@ -24,15 +24,16 @@ Negative stock during concurrent order requests is prevented through three defen
      .orderBy(asc(products.id))
      .for('update');
    ```
-   Because every concurrent transaction locks `products` rows in the exact same ascending UUID order (`ORDER BY id ASC FOR UPDATE`), circular wait conditions (deadlocks) between multi-item orders (`[Product A, Product B]` vs `[Product B, Product A]`) cannot occur.
+   Karena setiap transaksi yang berjalan bersamaan mengunci baris produk dengan urutan ID yang selalu sama (`ORDER BY id ASC FOR UPDATE`), kondisi *circular wait* (deadlock) antara order multi-item (misal `[Produk A, Produk B]` vs `[Produk B, Produk A]`) tidak akan pernah terjadi.
 
-2. **Post-Lock Stock Validation:**
-   When Transaction A and Transaction B concurrently attempt to buy 4 units of a product that has only 5 units in stock, PostgreSQL grants the `FOR UPDATE` row lock to Transaction A first and blocks Transaction B until Transaction A commits or rolls back.
-   - Transaction A validates `product.stock >= item.quantity` (`5 >= 4`), inserts the order and snapshots, decrements stock to `1`, and commits.
-   - Transaction B then unblocks, reads the freshly committed row state (`stock = 1`), fails the check `product.stock < item.quantity` (`1 < 4`), and throws `ValidationError('Insufficient stock')`, rolling back its transaction completely.
+2. **Validasi Stok Setelah Baris Terkunci (*Post-Lock Validation*):**
+   Ketika Transaksi A dan Transaksi B secara simultan mencoba membeli 4 unit dari produk yang stoknya hanya tersisa 5:
+   - PostgreSQL memberikan kunci baris (`FOR UPDATE`) ke Transaksi A terlebih dahulu, sementara Transaksi B ditahan (*blocked/queued*).
+   - Transaksi A memeriksa kondisi `product.stock >= item.quantity` (`5 >= 4`), berhasil membuat order, memotong stok menjadi `1`, lalu melakukan `COMMIT`.
+   - Transaksi B baru terlepas dari antrean dan membaca data produk yang baru saja di-commit (`stock = 1`). Pengecekan `product.stock < item.quantity` (`1 < 4`) gagal, sehingga sistem melempar `ValidationError('Stok tidak mencukupi')` dan membatalkan (*ROLLBACK*) seluruh transaksi secara utuh.
 
-3. **Atomic Conditional Update & PostgreSQL CHECK Constraint:**
-   When decrementing inventory in step 16 of `OrdersService.createOrder`, the `UPDATE` statement includes an atomic guard (`WHERE id = $1 AND stock >= $2`):
+3. **Pengurangan Atomik Bersyarat & PostgreSQL CHECK Constraint:**
+   Saat memotong stok produk di langkah ke-16 `OrdersService.createOrder`, perintah SQL `UPDATE` diberi klausul pengaman atomik (`WHERE id = $1 AND stock >= $2`):
    ```ts
    const updatedRows = await tx
      .update(products)
@@ -43,41 +44,43 @@ Negative stock during concurrent order requests is prevented through three defen
      .where(and(eq(products.id, item.product_id), gte(products.stock, item.quantity)))
      .returning({ id: products.id });
    ```
-   Additionally, the `products` table in [`backend/src/db/schema/index.ts`](backend/src/db/schema/index.ts) enforces `CHECK ("products"."stock" >= 0)` (`products_stock_non_negative_chk`) at the storage engine level, making negative inventory impossible even if application code were bypassed.
+   Selain itu, tabel `products` pada [`backend/src/db/schema/index.ts`](backend/src/db/schema/index.ts) memiliki aturan `CHECK ("products"."stock" >= 0)` (`products_stock_non_negative_chk`) langsung di level database engine PostgreSQL, sehingga stok negatif secara fisik mustahil terjadi meskipun kode aplikasi di-bypass.
 
-4. **Verification:**
-   This exact race condition is tested in [`backend/tests/orders.integration.test.ts`](backend/tests/orders.integration.test.ts) (`prevents overselling when two concurrent orders compete for limited stock`), where two concurrent `POST /api/orders` requests each order 4 units of a 5-unit product via `Promise.all`; one returns `201 Created`, the other returns `422 Unprocessable Entity`, and final stock is verified to be `1`.
-
----
-
-## 2. Why was this folder structure and layering selected, and what would change if the application grew?
-
-### Why This Structure Was Selected
-
-The repository uses an independent two-project monorepo (`backend/` and `frontend/`) with domain-modular layering inside `backend/src/modules/{auth,products,customers,orders}`:
-
-- **Independent Deployment Boundary:** Vercel deploys `frontend/` and `backend/` as separate projects on separate domains. Keeping independent `package.json` and `tsconfig.json` files ensures neither project bundles the other's runtime dependencies (e.g., Next.js never bundles `pg` or `bcryptjs`, and Express never bundles React).
-- **Clear Separation of Concerns Within Modules:** Each backend domain module is split into:
-  - `*.schema.ts`: Zod input validation and strict payload whitelisting (e.g., `createOrderSchema` in `backend/src/modules/orders/orders.schema.ts`).
-  - `*.controller.ts`: Thin HTTP adapters that parse inputs and delegate to services using `sendSuccess`.
-  - `*.service.ts`: Business rules, financial calculations (`calculateVariantCTaxCents` in `backend/src/utils/money.ts`), and database transaction boundaries (`db.transaction(...)`).
-  - `*.routes.ts`: Express router registration and middleware attachment (`requireAuth`, `loginLimiter`).
-
-### What Would Change If the Application Grew
-
-1. **Shared Workspace Types Package (`packages/contracts`):** If the system expanded to 15+ modules, duplicating Zod schemas and TypeScript interfaces between `backend/src/modules/*` and `frontend/src/types/index.ts` would introduce drift. We would extract a shared workspace package or OpenAPI codegen pipeline.
-2. **Dedicated Repository / Data-Access Layer:** Currently, Drizzle ORM queries live inside `*.service.ts` (`ProductsService`, `OrdersService`). As query complexity grows (e.g., multi-warehouse stock allocation, credit limits, reporting), extracting `*.repository.ts` classes that accept a transaction handle (`tx`) would decouple domain orchestration from SQL syntax.
-3. **Outbox Pattern for Side Effects:** When order payment or cancellation needs to trigger external side effects (sending invoice emails, notifying ERP/shipping webhooks), we would add a `transactional_outbox` table written inside the same `db.transaction` in `OrdersService.createOrder` / `payOrder` / `cancelOrder` and processed asynchronously by a background worker.
+4. **Verifikasi Pengujian Otomatis:**
+   Skenario balapan (*race condition*) ini dibuktikan pada file pengujian [`backend/tests/orders.integration.test.ts`](backend/tests/orders.integration.test.ts) pada bagian:
+   `Anti-Overselling (Pessimistic Lock): Mencegah stok minus saat dua order masuk bersamaan berebut sisa stok`.
+   Dua request `POST /api/orders` masing-masing meminta 4 unit barang dari produk bersisa 5 secara serentak (`Promise.all`); tepat 1 transaksi sukses (`HTTP 201`) dan 1 transaksi ditolak (`HTTP 422`), dengan sisa stok akhir terbukti tepat bernilai `1`.
 
 ---
 
-## 3. Describe one real bug encountered and how it was discovered and fixed.
+## 2. Mengapa struktur folder dan lapisan kode Anda seperti ini, dan apa yang akan Anda ubah jika aplikasi membesar?
 
-### Bug: Date-Only Filter Strings Excluding Same-Day Orders in `GET /api/orders`
+### Alasan Pemilihan Struktur Saat Ini
 
-- **Where It Occurred:** [`backend/src/modules/orders/orders.service.ts`](backend/src/modules/orders/orders.service.ts) in `OrdersService.listOrders`.
-- **How It Was Discovered:** When filtering orders by date range using `YYYY-MM-DD` query strings from the frontend calendar picker (e.g., `?start_date=2026-11-02&end_date=2026-11-02`), `new Date('2026-11-02')` parses to `2026-11-02T00:00:00.000Z` (midnight). Using `lte(orders.createdAt, new Date(end_date))` caused any order created after `00:00:00.000` on `end_date` to be excluded from the results when the user selected today's date as both `start_date` and `end_date`.
-- **How It Was Fixed:** In `OrdersService.listOrders` (`backend/src/modules/orders/orders.service.ts`), date-only strings (`length <= 10`) are normalized so `start_date` starts at `00:00:00.000` local time and `end_date` extends to the end of the day (`23:59:59.999`):
+Repositori ini menerapkan arsitektur *two-project monorepo* mandiri (`backend/` dan `frontend/`) dengan pembagian modular berbasis domain di dalam [`backend/src/modules/{auth,products,customers,orders}`](backend/src/modules/):
+
+- **Batas Deployment yang Independen:** Backend Express dan Frontend Next.js di-deploy sebagai dua layanan terpisah dengan `package.json` dan `tsconfig.json` masing-masing. Hal ini mencegah dependensi runtime bercampur (misalnya Next.js tidak akan mem-bundle library Node `pg` atau `bcryptjs`, dan Express tidak mem-bundle dependensi React).
+- **Pemisahan Tanggung Jawab (*Separation of Concerns*):** Tiap modul backend dibagi menjadi:
+  - `*.schema.ts`: Skema validasi Zod yang ketat (*whitelisting payload* aman, membuang properti berbahaya dari request).
+  - `*.controller.ts`: Adapter HTTP ramping yang mem-parsing input dan mengembalikan response terstandarisasi (`sendSuccess`).
+  - `*.service.ts`: Pusat aturan bisnis, formula finansial (`calculateVariantCTaxCents` di [`backend/src/utils/money.ts`](backend/src/utils/money.ts)), dan batasan transaksi database (`db.transaction`).
+  - `*.routes.ts`: Pendaftaran router Express dan pemasangan middleware keamanan (`requireAuth`, `loginLimiter`).
+
+### Apa yang Akan Diubah Jika Aplikasi Membesar (*Scalability*)
+
+1. **Shared Contracts Package (`packages/contracts`):** Jika modul berkembang menjadi belasan atau puluhan, antarmuka TypeScript dan Zod schema yang saat ini ada di backend dan frontend akan diekstrak menjadi satu package monorepo bersama (`npm workspace`) atau di-generate otomatis via OpenAPI/Swagger untuk mencegah inkonsistensi tipe data.
+2. **Lapisan Akses Data / Repository Pattern:** Saat ini kueri Drizzle ORM dijalankan langsung di dalam `*.service.ts`. Jika logika kueri semakin rumit (misal alokasi stok multi-gudang, limit kredit pelanggan, pencatatan jurnal akuntansi), pembuatan file `*.repository.ts` yang menerima objek transaksi (`tx`) akan memisahkan orkestrasi bisnis murni dari sintaks SQL.
+3. **Pola Transaksional Outbox & Message Broker:** Jika status pembayaran (`PAID`) atau pembatalan (`CANCELLED`) harus memicu integrasi pihak ketiga (email invoice, push notification, webhook logistik/ERP), kita akan menambahkan tabel `transactional_outbox` yang ditulis di transaksi yang sama, lalu diproses secara asinkron oleh background worker (misal menggunakan BullMQ/Redis atau Kafka) agar tidak memperlambat respon HTTP pengguna.
+
+---
+
+## 3. Satu bug atau masalah nyata yang ditemui saat pengerjaan, dan bagaimana cara menemukannya.
+
+### Masalah: Filter Rentang Tanggal `YYYY-MM-DD` Mengabaikan Order di Hari yang Sama pada `GET /api/orders`
+
+- **Lokasi Terjadinya:** [`backend/src/modules/orders/orders.service.ts`](backend/src/modules/orders/orders.service.ts) pada fungsi `OrdersService.listOrders`.
+- **Bagaimana Ditemukan:** Saat menguji filter order di frontend dengan memasukkan tanggal hari ini pada `start_date` dan `end_date` (misal `?start_date=2026-11-02&end_date=2026-11-02`), daftar order yang baru saja dibuat hari itu tidak muncul sama sekali. Setelah ditelusuri, `new Date('2026-11-02')` secara default diubah ke `2026-11-02T00:00:00.000Z` (tengah malam). Penggunaan operator kueri SQL `lte(orders.createdAt, new Date(end_date))` membuat seluruh order yang dibuat setelah jam `00:00:00` di hari tersebut tersaring keluar.
+- **Solusi Perbaikan:** Pada `OrdersService.listOrders`, format tanggal berupa string tanggal murni (`length <= 10`) dinormalisasi secara eksplisit: `start_date` diset ke awal hari (`00:00:00.000`), dan `end_date` diperpanjang hingga detik terakhir hari bersangkutan (`23:59:59.999`):
   ```ts
   if (start_date) {
     const start = new Date(start_date);
@@ -98,29 +101,28 @@ The repository uses an independent two-project monorepo (`backend/` and `fronten
 
 ---
 
-## 4. Identify unfinished or weak areas and explain the next improvement.
+## 4. Bagian yang belum selesai atau masih lemah, serta langkah perbaikan selanjutnya.
 
-1. **Stateless JWT Revocation / Refresh Token Rotation:**
-   - *Current State:* `POST /api/auth/logout` (`frontend/src/app/api/auth/logout/route.ts`) clears the `azatech_session` HttpOnly cookie on the Next.js BFF domain, immediately ending browser access. However, the underlying Express JWT (`backend/src/lib/jwt.ts`) remains cryptographically valid until `JWT_EXPIRES_IN` (`8h`) elapses.
-   - *Next Improvement:* Issue short-lived access tokens (`15m`) paired with a database-backed `refresh_tokens` table (storing a token family hash and `revoked_at` timestamp) so sessions can be revoked server-side immediately on password change or logout.
-2. **Serverless Rate Limiting Storage:**
-   - *Current State:* Login rate limiting in [`backend/src/modules/auth/auth.routes.ts`](backend/src/modules/auth/auth.routes.ts) uses `express-rate-limit` with its default store, which is per-instance in Vercel serverless functions.
-   - *Next Improvement:* Back the rate limiter with Upstash Redis or a PostgreSQL rate-limit bucket table so brute-force counters are shared across all serverless cold starts.
-3. **Audit Trail for Inventory & Status Changes:**
-   - *Current State:* `products.stock` is updated in-place during `ProductsService.update`, `OrdersService.createOrder`, and `OrdersService.cancelOrder`.
-   - *Next Improvement:* Introduce an immutable `inventory_movements` ledger table recording every stock delta (`+` / `-`), actor `user_id`, reason (`INITIAL_SEED`, `MANUAL_ADJUSTMENT`, `ORDER_CREATED`, `ORDER_CANCELLED`), and reference `order_id`.
-
+1. **Pencabutan Token JWT Stateless (*Token Blacklist / Refresh Token Rotation*):**
+   - *Kondisi Saat Ini:* Fitur logout (`POST /api/auth/logout`) di Next.js BFF menghapus cookie HttpOnly `azatech_session`, sehingga browser seketika kehilangan sesi. Namun secara kriptografis token JWT Express masih valid hingga masa kadaluwarsanya berakhir (`8h`).
+   - *Langkah Perbaikan:* Menggunakan access token berumur pendek (15 menit) yang dipasangkan dengan mekanisme *Refresh Token* berbasis database (tabel `refresh_tokens`) sehingga sesi dapat langsung di-revoke di sisi server saat user logout atau mengganti password.
+2. **Penyimpanan Rate Limiting Terdistribusi:**
+   - *Kondisi Saat Ini:* Pembatasan brute force login di [`backend/src/modules/auth/auth.routes.ts`](backend/src/modules/auth/auth.routes.ts) menggunakan memori bawaan `express-rate-limit` per *instance/container*.
+   - *Langkah Perbaikan:* Menghubungkan rate limiter ke Upstash Redis atau tabel counter PostgreSQL agar hitungan percobaan login tersinkronisasi di seluruh container/serverless instance.
+3. **Buku Besar Audit Jejak Stok (*Inventory Audit Trail Ledger*):**
+   - *Kondisi Saat Ini:* Kolom `products.stock` diubah langsung di tempat (*in-place update*) saat order dibuat atau dibatalkan.
+   - *Langkah Perbaikan:* Menambahkan tabel `inventory_movements` yang bersifat *append-only* (mencatat delta `+` / `-`, user ID pelaku, alasan transaksi `ORDER_CREATED` / `ORDER_CANCELLED`, dan nomor order terkait) untuk mempermudah audit fisik dan rekonsiliasi stok gudang.
 
 ---
 
-## 5. Concurrency, Counter Allocation & Idempotency Key Design
+## 5. Arsitektur Tambahan: Nomor Invoice Harian & Idempotency Key
 
-### A. Daily Order Counter (`order_counters`) & Asia/Jakarta Timezone
-To prevent race conditions during high-concurrency order placement without locking entire tables, we implemented a dedicated daily counter table `order_counters` with:
-- `date_key VARCHAR(8) PRIMARY KEY`: Formatted as `YYYYMMDD` using the `Asia/Jakarta` timezone (`Intl.DateTimeFormat` with `timeZone: 'Asia/Jakarta'`).
-- `last_sequence INTEGER NOT NULL`: The highest sequence allocated for that date.
+### A. Counter Nomor Invoice Harian (`order_counters`) dengan Zona Waktu Asia/Jakarta
+Untuk menghasilkan nomor invoice berurutan tanpa mengunci seluruh tabel `orders`, dibuat tabel khusus `order_counters`:
+- `date_key VARCHAR(8) PRIMARY KEY`: Berformat `YYYYMMDD` berdasarkan waktu lokal `Asia/Jakarta`.
+- `last_sequence INTEGER NOT NULL`: Angka urutan terakhir pada hari tersebut.
 
-Sequence allocation inside the order creation transaction executes:
+Alokasi nomor urut dijalankan secara atomik di dalam transaksi:
 ```sql
 INSERT INTO order_counters (date_key, last_sequence, updated_at)
 VALUES ($1, 1, NOW())
@@ -128,20 +130,18 @@ ON CONFLICT (date_key) DO UPDATE
 SET last_sequence = order_counters.last_sequence + 1, updated_at = NOW()
 RETURNING last_sequence;
 ```
-This guarantees strictly sequential, gapless numbers formatted as `INV-YYYYMMDD-XXXX` (e.g. `INV-20261102-0001`) with row-level locks held only for microsecond durations. Furthermore, a `UNIQUE` constraint on `orders.order_number` acts as a fail-safe.
+Hasilnya adalah nomor invoice unik `INV-YYYYMMDD-XXXX` (contoh: `INV-20261102-0001`) yang terjamin urut, bebas tabrakan, dan dilindungi oleh konstrain `UNIQUE` pada kolom `orders.order_number`.
 
-### B. Single Transaction Cancellation Safety
-Order cancellation (`OrdersService.cancelOrder`) executes inside a single database transaction using conditional status transitions:
-1. `SELECT ... FROM orders WHERE id = $1 FOR UPDATE` locks the order row.
-2. If `order.status` is not `PENDING` or `PAID`, throw `ConflictError` (HTTP 409).
-3. Update `orders.status = 'CANCELLED'` conditionally (`WHERE id = $1 AND status IN ('PENDING', 'PAID')`).
-4. Read all items from `order_items` and restore each product's stock (`stock = stock + quantity`).
-If two simultaneous cancel requests are fired via `Promise.all`, exactly one successfully transitions the status and restores stock; the second receives HTTP 409 and stock is never restored twice.
+### B. Keamanan Transaksi Pembatalan Order (PATCH /cancel)
+Pembatalan order (`OrdersService.cancelOrder`) dijalankan dalam satu transaksi database:
+1. `SELECT ... FROM orders WHERE id = $1 FOR UPDATE` mengunci baris order.
+2. Jika status order bukan `PENDING` atau `PAID`, sistem melempar `ConflictError` (HTTP 409).
+3. Status diubah menjadi `CANCELLED`.
+4. Seluruh produk pada `order_items` dibaca dan stoknya dikembalikan (`stock = stock + quantity`).
+Jika dua request cancel dikirim bersamaan, tepat satu transaksi yang berhasil merestorasi stok; request kedua menerima HTTP 409 sehingga stok tidak akan pernah terduplikasi 2 kali.
 
-### C. Idempotency Key Handling (`order_idempotency`)
-For clients supplying the `Idempotency-Key` HTTP header:
-1. A unique database constraint on `(user_id, idempotency_key)` prevents collision.
-2. The SHA-256 hash of the request payload is persisted.
-3. If a request is received with an existing `Idempotency-Key`:
-   - If the request payload matches the recorded hash, the previously created order is fetched and returned immediately without recreating or re-decrementing stock.
-   - If the request payload differs from the original hash, the server immediately rejects the request with `HTTP 409 Conflict`.
+### C. Penanganan Idempotency Key (`order_idempotency`)
+Sistem mendukung header HTTP `Idempotency-Key` untuk mencegah order ganda saat jaringan internet pengguna tidak stabil:
+1. Hash SHA-256 dari payload pesanan disimpan bersama key tersebut.
+2. Jika request dengan key yang sama dikirim ulang dengan payload yang persis sama, sistem langsung mengembalikan data order sebelumnya tanpa membuat order baru atau memotong stok ulang.
+3. Jika key yang sama digunakan dengan payload berbeda, sistem menolak dengan `HTTP 409 Conflict`.
