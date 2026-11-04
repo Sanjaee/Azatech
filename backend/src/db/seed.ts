@@ -111,13 +111,6 @@ export const SEED_PRODUCTS = [
     price: '150000.00',
     stock: 100,
   },
-  {
-    productCode: 'PRD-OFF-016',
-    name: 'Fellow Stagg EKG Electric Pour-Over Kettle',
-    description: 'Precision variable temperature gooseneck electric kettle 0.9L matte black',
-    price: '2750000.00',
-    stock: 20,
-  },
 ];
 
 export const SEED_CUSTOMERS = [
@@ -181,12 +174,6 @@ export const SEED_CUSTOMERS = [
     phone: '+62-61-4567890',
     address: 'Jl. Diponegoro No. 31, Madras Hulu, Kota Medan, Sumatera Utara 20152',
   },
-  {
-    name: 'Hendra Gunawan',
-    email: 'hendra.gunawan@cloudware.id',
-    phone: '+62-817-8899-0011',
-    address: 'BSD Green Office Park, Serpong, Tangerang Selatan, Banten 15345',
-  },
 ];
 
 export async function runSeed(customDb = getDb()): Promise<void> {
@@ -241,7 +228,7 @@ export async function runSeed(customDb = getDb()): Promise<void> {
   }
 
   console.log(
-    `Seed completed: 1 admin user (${env.SEED_ADMIN_EMAIL}), ${SEED_PRODUCTS.length} products, ${SEED_CUSTOMERS.length} customers.`
+    `Seeder selesai: 1 user admin (${env.SEED_ADMIN_EMAIL}), ${SEED_PRODUCTS.length} produk, ${SEED_CUSTOMERS.length} pelanggan.`
   );
 }
 

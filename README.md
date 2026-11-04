@@ -170,8 +170,8 @@ npm run db:seed
 
 The seeder is **idempotent** and safe to run repeatedly. It populates:
 - **1 Admin User**
-- **16 Realistic Products** (`PRD-ELC-001` through `PRD-OFF-016`)
-- **11 Realistic Customers**
+- **15 Produk** (PRD-ELC-001 s/d PRD-BEV-015)
+- **10 Pelanggan** (sesuai spesifikasi: 1 admin, minimal 15 produk, dan 10 pelanggan)
 
 ### Step 5: Development Admin Credentials
 

@@ -154,6 +154,53 @@ describe('Technical Test Azatech — Order Service (Varian C: PPN 11%)', () => {
       expect(res.body.success).toBe(false);
     });
 
+    it('PUT /api/products/:id: Berhasil memperbarui data produk (nama, harga, stok)', async () => {
+      const code = uniqueCode('PRD-UPD');
+      const createRes = await request(app)
+        .post('/api/products')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          product_code: code,
+          name: 'Initial Product',
+          price: 100000,
+          stock: 10,
+        });
+
+      expect(createRes.status).toBe(201);
+      const prodId = createRes.body.data.id;
+
+      const updateRes = await request(app)
+        .put(`/api/products/${prodId}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          name: 'Updated Product Name',
+          price: 150000,
+          stock: 20,
+        });
+
+      expect(updateRes.status).toBe(200);
+      expect(updateRes.body.success).toBe(true);
+      expect(updateRes.body.data.name).toBe('Updated Product Name');
+      expect(updateRes.body.data.price).toBe(150000);
+      expect(updateRes.body.data.stock).toBe(20);
+    });
+
+    it('POST /api/customers: Berhasil mendaftarkan pelanggan baru', async () => {
+      const res = await request(app)
+        .post('/api/customers')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          name: `PT Mitra Usaha ${Date.now()}`,
+          email: `info-${Date.now()}@mitrausaha.id`,
+          phone: '+62-21-99887766',
+          address: 'Jl. Gatot Subroto No. 45, Jakarta',
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.id).toBeDefined();
+    });
+
     it('Pelanggan: Menolak pembuatan order dan mengembalikan HTTP 404 jika customer ID tidak ditemukan', async () => {
       const db = getDb();
       const [anyProduct] = await db.select().from(products).limit(1);
