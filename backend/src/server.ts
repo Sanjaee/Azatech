@@ -3,9 +3,11 @@ import { env } from './config/env';
 import { ensureDatabaseReady, closeDatabase } from './db/runtime';
 
 async function startServer() {
-  if (env.NODE_ENV !== 'production') {
+  try {
     const { mode } = await ensureDatabaseReady({ seed: true });
-    console.log(`[Azatech DB] Connected using mode: ${mode.toUpperCase()}`);
+    console.log(`[Azatech DB] Connected using mode: ${mode.toUpperCase()} (migrations & seed verified)`);
+  } catch (err) {
+    console.warn('[Azatech DB] Notice during ensureDatabaseReady:', err);
   }
 
   const server = app.listen(env.PORT, () => {

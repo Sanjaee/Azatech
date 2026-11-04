@@ -13,8 +13,8 @@ services:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-azatech} -d ${POSTGRES_DB:-azatech_oms}"]
-      interval: 5s
-      timeout: 5s
+      interval: 3s
+      timeout: 3s
       retries: 5
 
   backend:
@@ -30,7 +30,9 @@ services:
       NODE_ENV: production
       DATABASE_URL: postgresql://${POSTGRES_USER:-azatech}:${POSTGRES_PASSWORD:-azatech_password}@postgres:5432/${POSTGRES_DB:-azatech_oms}
       JWT_SECRET: ${JWT_SECRET:-azatech_production_super_secret_jwt_key_2026_x99}
+      JWT_EXPIRES_IN: 8h
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      CORS_ALLOWED_ORIGINS: http://localhost:3000,http://127.0.0.1:3000,https://azatech-web.vercel.app
       SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-admin@azatech.id}
       SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-Admin@Azatech2026!}
     depends_on:
@@ -49,8 +51,10 @@ services:
       PORT: 3000
       NODE_ENV: production
       NEXT_PUBLIC_APP_URL: http://localhost:3000
+      BACKEND_API_URL: http://backend:4000
       BACKEND_INTERNAL_URL: http://backend:4000
       NEXT_PUBLIC_BACKEND_URL: http://localhost:4000
+      AUTH_COOKIE_NAME: azatech_session
     depends_on:
       - backend
 

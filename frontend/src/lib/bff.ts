@@ -2,19 +2,23 @@ import { cookies } from 'next/headers';
 import { NextRequest, NextResponse } from 'next/server';
 
 export const AUTH_COOKIE_NAME = process.env.AUTH_COOKIE_NAME || 'azatech_session';
-export const BACKEND_API_URL = (process.env.BACKEND_API_URL || 'http://localhost:4000').replace(
-  /\/+$/,
-  ''
-);
+export const BACKEND_API_URL = (
+  process.env.BACKEND_API_URL ||
+  process.env.BACKEND_INTERNAL_URL ||
+  'http://localhost:4000'
+).replace(/\/+$/, '');
 
 const EIGHT_HOURS_SECONDS = 8 * 60 * 60;
 
 export function setAuthCookie(response: NextResponse, token: string): void {
-  const isProd = process.env.NODE_ENV === 'production';
+  // Use secure cookie in production when on HTTPS/Vercel; allow plain HTTP on local Docker (localhost)
+  const isSecure =
+    process.env.COOKIE_SECURE === 'true' ||
+    (process.env.NODE_ENV === 'production' && process.env.VERCEL === '1');
 
   response.cookies.set(AUTH_COOKIE_NAME, token, {
     httpOnly: true,
-    secure: isProd,
+    secure: isSecure,
     sameSite: 'lax',
     path: '/',
     maxAge: EIGHT_HOURS_SECONDS,
@@ -23,11 +27,13 @@ export function setAuthCookie(response: NextResponse, token: string): void {
 }
 
 export function clearAuthCookie(response: NextResponse): void {
-  const isProd = process.env.NODE_ENV === 'production';
+  const isSecure =
+    process.env.COOKIE_SECURE === 'true' ||
+    (process.env.NODE_ENV === 'production' && process.env.VERCEL === '1');
 
   response.cookies.set(AUTH_COOKIE_NAME, '', {
     httpOnly: true,
-    secure: isProd,
+    secure: isSecure,
     sameSite: 'lax',
     path: '/',
     maxAge: 0,
